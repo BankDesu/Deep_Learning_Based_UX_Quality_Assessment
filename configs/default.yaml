@@ -1,0 +1,17 @@
+model:
+  image_size: 224
+  in_channels: 3
+  patch_size: 4
+  visual_embed_dim: 128
+  transformer_layers: 4
+  num_heads: 8
+  ff_dim: 512
+  dropout: 0.1
+  max_ui_elements: 16
+  gnn_layers: 2
+  output_dim: 128
+
+train:
+  batch_size: 8
+  learning_rate: 0.0001
+  epochs: 5
