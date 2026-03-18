@@ -1,0 +1,46 @@
+name: Branch Protection Rules
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+
+permissions: {}
+
+jobs:
+  check-merge-into-main:
+    name: Only dev can merge into main
+    if: github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Check source branch
+        run: |
+          echo "PR target branch: ${{ github.base_ref }}"
+          echo "PR source branch: ${{ github.head_ref }}"
+          if [ "${{ github.head_ref }}" != "dev" ]; then
+            echo "ERROR: Only the 'dev' branch is allowed to merge into 'main'."
+            echo "Please merge your feature branch into 'dev' first, then open a PR from 'dev' to 'main'."
+            exit 1
+          fi
+          echo "OK: Source branch is 'dev'. Merge into 'main' is allowed."
+
+  check-merge-into-dev:
+    name: Feature branches must merge into dev
+    if: github.base_ref == 'dev'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Check source branch
+        run: |
+          echo "PR target branch: ${{ github.base_ref }}"
+          echo "PR source branch: ${{ github.head_ref }}"
+          if [ "${{ github.head_ref }}" == "main" ]; then
+            echo "ERROR: The 'main' branch cannot be merged directly into 'dev'."
+            echo "Feature branches should be created from 'dev' and merged back into 'dev'."
+            exit 1
+          fi
+          echo "OK: Source branch '${{ github.head_ref }}' is allowed to merge into 'dev'."
