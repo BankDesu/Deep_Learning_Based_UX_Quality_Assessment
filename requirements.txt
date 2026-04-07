@@ -1,2 +1,5 @@
 torch>=2.2.0
 pyyaml>=6.0.1
+wandb>=0.17.0
+# Optional: required only when model.detector_backend=yolo
+ultralytics>=8.2.0

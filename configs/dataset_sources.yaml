@@ -1,0 +1,35 @@
+sources:
+  publaynet:
+    method: manual
+    note: "Set to kaggle or url after you select the mirror/source."
+    kaggle_dataset: ""
+    url: ""
+    output_dir: data/raw/publaynet
+
+  webui:
+    method: manual
+    note: "Set to kaggle or url based on your chosen WebUI dataset source."
+    kaggle_dataset: ""
+    url: ""
+    output_dir: data/raw/webui
+
+  salicon:
+    method: manual
+    note: "Set to kaggle or url."
+    kaggle_dataset: ""
+    url: ""
+    output_dir: data/raw/salicon
+
+  wdqd:
+    method: manual
+    note: "Provide your WDQD source (often private/research link)."
+    kaggle_dataset: ""
+    url: ""
+    output_dir: data/raw/wdqd
+
+  webpage_aesthetics:
+    method: manual
+    note: "Provide benchmark source link or Kaggle slug if available."
+    kaggle_dataset: ""
+    url: ""
+    output_dir: data/raw/webpage_aesthetics

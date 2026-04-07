@@ -29,6 +29,10 @@ class UXAssessmentModel(nn.Module):
             out_dim=c.output_dim,
             max_elements=c.max_ui_elements,
             gnn_layers=c.gnn_layers,
+            detector_backend=c.detector_backend,
+            yolo_model_path=c.yolo_model_path,
+            yolo_conf_threshold=c.yolo_conf_threshold,
+            yolo_iou_threshold=c.yolo_iou_threshold,
         )
         self.attention_branch = AttentionBranch(
             visual_dim=c.visual_embed_dim,
@@ -44,18 +48,15 @@ class UXAssessmentModel(nn.Module):
         )
         self.pred_head = UXPredictionHead(c.output_dim)
 
-    def _attention_guided_visual_tokens(
-        self, visual_feature_map: torch.Tensor, attention_map: torch.Tensor
-    ) -> torch.Tensor:
-        weighted_map = visual_feature_map * (1.0 + attention_map)
-        tokens = weighted_map.flatten(2).transpose(1, 2)
+    def _visual_tokens(self, visual_feature_map: torch.Tensor) -> torch.Tensor:
+        tokens = visual_feature_map.flatten(2).transpose(1, 2)
         return self.visual_proj(tokens)
 
     def forward(self, screenshot: torch.Tensor) -> dict[str, torch.Tensor]:
         visual_feature_map = self.visual_encoder(screenshot)
-        layout = self.layout_branch(visual_feature_map)
+        layout = self.layout_branch(visual_feature_map, screenshot=screenshot)
         attention = self.attention_branch(visual_feature_map)
-        visual_tokens = self._attention_guided_visual_tokens(visual_feature_map, attention.heatmap)
+        visual_tokens = self._visual_tokens(visual_feature_map)
 
         fused = self.cross_modal_transformer(
             visual_tokens=visual_tokens,
@@ -67,4 +68,6 @@ class UXAssessmentModel(nn.Module):
         preds = self.pred_head(fused_cls)
         preds["visual_feature_map"] = visual_feature_map
         preds["attention_heatmap"] = attention.heatmap
+        preds["layout_embedding"] = layout.layout_embedding
+        preds["attention_embedding"] = attention.attention_embedding
         return preds

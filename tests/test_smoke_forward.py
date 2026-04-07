@@ -16,3 +16,5 @@ def test_end_to_end_forward_shapes() -> None:
     assert out["attention_alignment"].shape == (2, 1)
     assert out["visual_feature_map"].ndim == 4
     assert out["attention_heatmap"].ndim == 4
+    assert out["layout_embedding"].shape == (2, cfg.output_dim)
+    assert out["attention_embedding"].shape == (2, cfg.output_dim)

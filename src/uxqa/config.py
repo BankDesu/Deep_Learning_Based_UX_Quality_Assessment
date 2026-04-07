@@ -18,6 +18,10 @@ class ModelConfig:
     max_ui_elements: int = 16
     gnn_layers: int = 2
     output_dim: int = 128
+    detector_backend: str = "placeholder"
+    yolo_model_path: str = "yolov8n.pt"
+    yolo_conf_threshold: float = 0.25
+    yolo_iou_threshold: float = 0.7
 
 
 @dataclass(slots=True)
@@ -25,6 +29,11 @@ class TrainConfig:
     batch_size: int = 8
     learning_rate: float = 1e-4
     epochs: int = 5
+    ux_loss_weight: float = 1.0
+    layout_loss_weight: float = 0.5
+    attention_loss_weight: float = 0.5
+    use_wandb: bool = True
+    wandb_project: str = "CV project"
 
 
 @dataclass(slots=True)

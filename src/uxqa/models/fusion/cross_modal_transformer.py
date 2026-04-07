@@ -19,6 +19,18 @@ class CrossModalTransformer(nn.Module):
     ) -> None:
         super().__init__()
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
+        self.attention_gate = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+            nn.Sigmoid(),
+        )
+        self.layout_gate = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+            nn.Sigmoid(),
+        )
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=dim,
             nhead=num_heads,
@@ -39,8 +51,17 @@ class CrossModalTransformer(nn.Module):
     ) -> torch.Tensor:
         b = visual_tokens.shape[0]
         cls = self.cls_token.expand(b, -1, -1)
+
+        # Attention-guided feature weighting from the attention branch token.
+        attention_scale = self.attention_gate(attention_token.squeeze(1)).unsqueeze(1)
+        guided_visual = visual_tokens * (1.0 + attention_scale)
+
+        # Layout-aware bias with graph density modulating layout and visual influence.
         density_scale = (1.0 + graph_density).reshape(b, 1, 1)
         scaled_layout = layout_token * density_scale
-        tokens = torch.cat([cls, visual_tokens, scaled_layout, attention_token], dim=1)
+        layout_scale = self.layout_gate(layout_token.squeeze(1)).unsqueeze(1)
+        guided_visual = guided_visual * (1.0 + (layout_scale * density_scale))
+
+        tokens = torch.cat([cls, guided_visual, scaled_layout, attention_token], dim=1)
         fused = self.encoder(tokens)
         return self.norm(fused)

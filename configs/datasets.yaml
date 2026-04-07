@@ -1,0 +1,54 @@
+datasets:
+  layout_detection:
+    task: layout_detection
+    dataset_name: PubLayNet
+    raw_root: data/raw/publaynet
+    image_dir: data/raw/publaynet/images
+    annotation_dir: data/raw/publaynet/annotations
+    split_files:
+      train: data/manifests/publaynet_train.csv
+      val: data/manifests/publaynet_val.csv
+      test: data/manifests/publaynet_test.csv
+
+  ui_detection_website:
+    task: ui_detection
+    dataset_name: WebUI Dataset
+    raw_root: data/raw/webui
+    image_dir: data/raw/webui/images
+    annotation_dir: data/raw/webui/annotations
+    split_files:
+      train: data/manifests/webui_train.csv
+      val: data/manifests/webui_val.csv
+      test: data/manifests/webui_test.csv
+
+  attention_modeling:
+    task: attention_modeling
+    dataset_name: SALICON
+    raw_root: data/raw/salicon
+    image_dir: data/raw/salicon/images
+    fixation_dir: data/raw/salicon/fixations
+    saliency_map_dir: data/raw/salicon/maps
+    split_files:
+      train: data/manifests/salicon_train.csv
+      val: data/manifests/salicon_val.csv
+      test: data/manifests/salicon_test.csv
+
+  ux_score_training:
+    task: ux_score_training
+    dataset_name: WDQD
+    raw_root: data/raw/wdqd
+    image_dir: data/raw/wdqd/images
+    label_dir: data/raw/wdqd/labels
+    split_files:
+      train: data/manifests/wdqd_train.csv
+      val: data/manifests/wdqd_val.csv
+      test: data/manifests/wdqd_test.csv
+
+  ux_evaluation_benchmark:
+    task: ux_evaluation_benchmark
+    dataset_name: WebPage Aesthetics
+    raw_root: data/raw/webpage_aesthetics
+    image_dir: data/raw/webpage_aesthetics/images
+    label_dir: data/raw/webpage_aesthetics/labels
+    split_files:
+      benchmark: data/manifests/webpage_aesthetics_benchmark.csv
