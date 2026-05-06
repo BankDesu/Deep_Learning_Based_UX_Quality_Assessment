@@ -18,9 +18,40 @@ model:
 train:
   batch_size: 8
   learning_rate: 0.0001
-  epochs: 5
-  ux_loss_weight: 1.0
-  layout_loss_weight: 0.5
-  attention_loss_weight: 0.5
+  epochs: 50
+  # Primary loss: layout quality score vs. ground-truth quality label
+  layout_quality_loss_weight: 1.0
+  # Auxiliary loss: per-rule scores can be supervised with rule annotations
+  rule_score_loss_weight: 0.5
   use_wandb: true
   wandb_project: CV project
+
+# Rule checker configuration
+rules:
+  n_rules: 9
+  touch_target_min_norm: 0.117   # 44px / 375px mobile width
+  wcag_aa_contrast: 4.5
+  whitespace_lo: 0.25
+  whitespace_hi: 0.60
+  # Rule names (for logging / visualization)
+  names:
+    - contrast
+    - whitespace
+    - visual_balance
+    - density
+    - alignment
+    - touch_target
+    - cta_prominence
+    - reading_flow
+    - heading_hierarchy
+  # Prior importance weights (sum not required to equal 1)
+  weights:
+    - 1.5   # contrast
+    - 1.0   # whitespace
+    - 0.8   # visual_balance
+    - 1.0   # density
+    - 1.2   # alignment
+    - 1.5   # touch_target
+    - 1.0   # cta_prominence
+    - 0.8   # reading_flow
+    - 1.2   # heading_hierarchy
