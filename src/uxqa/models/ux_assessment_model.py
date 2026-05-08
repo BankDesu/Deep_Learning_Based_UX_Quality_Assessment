@@ -225,6 +225,8 @@ class UXAssessmentModel(nn.Module):
             "layout_embedding":    layout.layout_embedding,
             "layout_token":        layout.layout_token,
             "graph_density":       layout.graph_density,
+            "det_n_boxes":         layout.det_n_boxes,
+            "det_avg_conf":        layout.det_avg_conf,
             "attention_heatmap":   attention.heatmap,
             "attention_token":     attention.attention_token,
             "rule_scores":         head_out["rule_scores"],
@@ -260,4 +262,6 @@ class UXAssessmentModel(nn.Module):
             "attention_heatmap":   pipeline["attention_heatmap"],
             "layout_embedding":    pipeline["layout_embedding"],
             "visual_feature_map":  pipeline["visual_feature_map"],
+            "det_n_boxes":         pipeline["det_n_boxes"],
+            "det_avg_conf":        pipeline["det_avg_conf"],
         }

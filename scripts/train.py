@@ -19,7 +19,7 @@ from uxqa.data.uicrit_dataset import UICritDataset
 from uxqa.data.transforms import train_transforms, val_transforms
 from uxqa.models import UXAssessmentModel
 from uxqa.models.rules.definitions import RULE_NAMES
-from uxqa.utils.metrics import kendall_tau, spearman_rho, pearson_r, mean_absolute_error, rule_f1
+from uxqa.utils.metrics import kendall_tau, spearman_rho, pearson_r, mean_absolute_error, rule_f1, pairwise_ranking_loss
 
 
 def _fmt_seconds(secs: float) -> str:
@@ -36,16 +36,26 @@ def _compute_loss(
     quality_criterion: nn.Module,
     rule_criterion: nn.Module,
     ux_w: float,
-    rule_w: float = 0.5,
+    rank_w: float = 1.0,
+    rule_w: float = 0.05,
 ) -> tuple[torch.Tensor, dict]:
-    q_loss = quality_criterion(out["quality_score"], targets["quality_score"])
+    pred  = out["quality_score"]
+    truth = targets["quality_score"]
 
-    # rule_scores: 1 = good UX;  rule_labels: 1 = violated
+    mse_loss  = quality_criterion(pred, truth)
+    rank_loss = pairwise_ranking_loss(pred, truth)
+
+    # rule BCE: RuleChecker has no params so gradient goes nowhere,
+    # kept low-weight for monitoring purposes only
     pred_viol = (1.0 - out["rule_scores"]).clamp(1e-7, 1 - 1e-7)
     r_loss = rule_criterion(pred_viol, targets["rule_labels"])
 
-    total = ux_w * q_loss + rule_w * r_loss
-    return total, {"quality": q_loss.detach(), "rules": r_loss.detach()}
+    total = ux_w * mse_loss + rank_w * rank_loss + rule_w * r_loss
+    return total, {
+        "quality": mse_loss.detach(),
+        "ranking": rank_loss.detach(),
+        "rules":   r_loss.detach(),
+    }
 
 
 def run_train(
@@ -139,7 +149,7 @@ def run_train(
 
         # ── Train ──────────────────────────────────────────────────────────
         model.train()
-        total_loss = total_q = total_r = 0.0
+        total_loss = total_q = total_rank = total_r = 0.0
 
         for batch in train_loader:
             x = batch["screenshot"].to(device)
@@ -161,17 +171,20 @@ def run_train(
 
             total_loss += loss.item()
             total_q    += losses["quality"].item()
+            total_rank += losses["ranking"].item()
             total_r    += losses["rules"].item()
 
         scheduler.step()
         n = len(train_loader)
         avg_loss = total_loss / n
         avg_q    = total_q / n
+        avg_rank = total_rank / n
         avg_r    = total_r / n
 
         # ── Validation ─────────────────────────────────────────────────────
         model.eval()
         preds_list, targets_list, rule_sc_list, rule_lb_list = [], [], [], []
+        n_boxes_list, conf_list = [], []
 
         with torch.no_grad():
             for batch in val_loader:
@@ -181,6 +194,8 @@ def run_train(
                 targets_list.append(batch["quality_score"].unsqueeze(1))
                 rule_sc_list.append(out["rule_scores"].cpu())
                 rule_lb_list.append(batch["rule_labels"])
+                n_boxes_list.append(out["det_n_boxes"].cpu())
+                conf_list.append(out["det_avg_conf"].cpu())
 
         preds_t   = torch.cat(preds_list)
         targets_t = torch.cat(targets_list)
@@ -192,6 +207,9 @@ def run_train(
         pr   = pearson_r(preds_t, targets_t)
         mae  = mean_absolute_error(preds_t, targets_t)
         f1   = rule_f1(rule_sc, rule_lb, rule_names=RULE_NAMES)
+
+        avg_boxes = torch.cat(n_boxes_list).mean().item()
+        avg_conf  = torch.cat(conf_list).mean().item()
 
         # ── Timing & ETA ───────────────────────────────────────────────────
         epoch_elapsed = time.time() - epoch_start
@@ -219,7 +237,7 @@ def run_train(
             f"elapsed={_fmt_seconds(total_elapsed)}  ETA={_fmt_seconds(remaining)}"
         )
         print(
-            f"  train │ loss={avg_loss:.4f}  quality={avg_q:.4f}  rule={avg_r:.4f}"
+            f"  train │ loss={avg_loss:.4f}  quality={avg_q:.4f}  ranking={avg_rank:.4f}  rule={avg_r:.4f}"
         )
         print(
             f"  val   │ tau={tau:.4f}  rho={rho:.4f}  r={pr:.4f}  MAE={mae:.4f}"
@@ -227,6 +245,9 @@ def run_train(
         print(
             f"  rules │ macro_F1={f1['macro_f1']:.4f}  "
             + "  ".join(f"{n[:4]}={f1[f'f1_{n}']:.3f}" for n in RULE_NAMES)
+        )
+        print(
+            f"  det   │ avg_boxes={avg_boxes:.1f}  avg_conf={avg_conf:.3f}"
         )
         if is_best:
             print(f"  ✓ best checkpoint saved (tau={best_tau:.4f})")
@@ -237,8 +258,9 @@ def run_train(
             log = {
                 "epoch":              epoch,
                 "train/loss":         avg_loss,
-                "train/quality_loss": avg_q,
-                "train/rule_loss":    avg_r,
+                "train/quality_loss":  avg_q,
+                "train/ranking_loss":  avg_rank,
+                "train/rule_loss":     avg_r,
                 "val/kendall_tau":    tau,
                 "val/spearman_rho":   rho,
                 "val/pearson_r":      pr,
@@ -246,8 +268,10 @@ def run_train(
                 "val/macro_f1":       f1["macro_f1"],
                 "val/macro_precision": f1["macro_precision"],
                 "val/macro_recall":   f1["macro_recall"],
-                "best_tau":           best_tau,
-                "epoch_time_s":       epoch_elapsed,
+                "best_tau":              best_tau,
+                "epoch_time_s":          epoch_elapsed,
+                "det/avg_boxes":         avg_boxes,
+                "det/avg_conf":          avg_conf,
             }
             for name in RULE_NAMES:
                 log[f"val/f1_{name}"] = f1[f"f1_{name}"]

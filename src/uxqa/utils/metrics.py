@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 try:
     from scipy import stats as _stats
@@ -32,6 +33,32 @@ def pearson_r(pred: torch.Tensor, target: torch.Tensor) -> float:
         raise ImportError("scipy is required. pip install scipy")
     r, _ = _stats.pearsonr(_to_numpy(pred), _to_numpy(target))
     return float(r)
+
+
+def pairwise_ranking_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    margin: float = 0.05,
+) -> torch.Tensor:
+    """
+    Pairwise ranking loss — directly optimises for Kendall's Tau.
+
+    For every pair (i, j) where target_i > target_j by at least `margin`,
+    penalise if pred_i <= pred_j.
+
+    pred, target : [B, 1] float tensors
+    """
+    pred   = pred.view(-1)
+    target = target.view(-1)
+
+    diff_pred   = pred.unsqueeze(1)   - pred.unsqueeze(0)    # [B, B]
+    diff_target = target.unsqueeze(1) - target.unsqueeze(0)  # [B, B]
+
+    # Only penalise pairs where the target difference exceeds margin
+    valid = diff_target.abs() > margin
+    sign  = diff_target.sign()
+    loss  = F.relu(margin - sign * diff_pred)
+    return loss[valid].mean() if valid.any() else loss.mean() * 0.0
 
 
 def mean_absolute_error(pred: torch.Tensor, target: torch.Tensor) -> float:
