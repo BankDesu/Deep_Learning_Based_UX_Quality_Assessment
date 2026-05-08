@@ -18,6 +18,7 @@ class ModelConfig:
     max_ui_elements: int = 16
     gnn_layers: int = 2
     output_dim: int = 128
+    max_visual_tokens: int = 256
     detector_backend: str = "placeholder"
     yolo_model_path: str = "yolov8n.pt"
     yolo_conf_threshold: float = 0.25

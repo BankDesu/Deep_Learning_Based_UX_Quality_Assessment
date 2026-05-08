@@ -2,6 +2,7 @@ import torch
 
 from uxqa.config import ModelConfig
 from uxqa.models import UXAssessmentModel
+from uxqa.models.rules.definitions import N_RULES
 
 
 def test_end_to_end_forward_shapes() -> None:
@@ -11,13 +12,12 @@ def test_end_to_end_forward_shapes() -> None:
 
     out = model(x)
 
-    assert out["ux_score"].shape == (2, 1)
-    assert out["layout_quality"].shape == (2, 1)
-    assert out["attention_alignment"].shape == (2, 1)
+    assert out["quality_score"].shape == (2, 1)
+    assert out["rule_scores"].shape == (2, N_RULES)
+    assert out["rule_weights"].shape == (2, N_RULES)
     assert out["visual_feature_map"].ndim == 4
     assert out["attention_heatmap"].ndim == 4
     assert out["layout_embedding"].shape == (2, cfg.output_dim)
-    assert out["attention_embedding"].shape == (2, cfg.output_dim)
 
 
 def test_explicit_pipeline_shapes() -> None:
@@ -34,11 +34,10 @@ def test_explicit_pipeline_shapes() -> None:
     assert out["layout_token"].shape == (2, 1, cfg.output_dim)
     assert out["graph_density"].shape == (2,)
     assert out["attention_heatmap"].shape[0] == 2
-    assert out["attention_embedding"].shape == (2, cfg.output_dim)
     assert out["attention_token"].shape == (2, 1, cfg.output_dim)
+    assert out["rule_scores"].shape == (2, N_RULES)
+    assert out["rule_weights"].shape == (2, N_RULES)
     assert out["fused_tokens"].shape[0] == 2
     assert out["fused_tokens"].shape[-1] == cfg.output_dim
     assert out["fused_cls"].shape == (2, cfg.output_dim)
-    assert out["ux_score"].shape == (2, 1)
-    assert out["layout_quality"].shape == (2, 1)
-    assert out["attention_alignment"].shape == (2, 1)
+    assert out["quality_score"].shape == (2, 1)

@@ -7,21 +7,19 @@ Each ViolationInstance carries:
   - severity     : "high" / "medium" / "low"
   - description  : human-readable explanation
 
-Rule → localization strategy:
-  Element-level  (per bbox):  contrast, touch_target, cta_prominence, alignment
+Rule → localization strategy (7 rules):
+  Element-level  (per bbox):  contrast, cta_prominence, alignment
   Image-level    (full bbox): whitespace, density
   Flow-level     (top elements in wrong position): reading_flow
-  Semantic-level (heading elements): heading_hierarchy
   Balance-level  (centroid region): visual_balance
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 import torch
 
-from .definitions import RULE_NAMES, TOUCH_TARGET_MIN_NORM, WCAG_AA_CONTRAST
+from .definitions import RULE_NAMES, WCAG_AA_CONTRAST
 
 
 # ---------------------------------------------------------------------------
@@ -113,12 +111,10 @@ class IssueLocalizer:
 
     def localize(
         self,
-        screenshot: torch.Tensor,                   # [3, H, W]
-        boxes: torch.Tensor,                         # [N, 4]
-        rule_scores: torch.Tensor,                   # [9]
-        interactive_mask: torch.Tensor | None = None,
+        screenshot: torch.Tensor,               # [3, H, W]
+        boxes: torch.Tensor,                     # [N, 4]
+        rule_scores: torch.Tensor,               # [7]
         button_mask: torch.Tensor | None = None,
-        heading_levels: torch.Tensor | None = None,
     ) -> list[ViolationInstance]:
         """
         Returns all ViolationInstances for a single image.
@@ -126,7 +122,6 @@ class IssueLocalizer:
         is returned so callers can filter by severity or rule as needed.
         """
         img = screenshot.float().clamp(0.0, 1.0)
-        N = boxes.shape[0]
         violations: list[ViolationInstance] = []
 
         # Rule 0 — Contrast (element-level)
@@ -144,17 +139,11 @@ class IssueLocalizer:
         # Rule 4 — Alignment (element-level)
         violations += self._check_alignment(boxes, rule_scores[4])
 
-        # Rule 5 — Touch Target (per interactive element)
-        violations += self._check_touch_target(boxes, interactive_mask, rule_scores[5])
+        # Rule 5 — CTA Prominence (per button element)
+        violations += self._check_cta_prominence(boxes, button_mask, rule_scores[5])
 
-        # Rule 6 — CTA Prominence (per button element)
-        violations += self._check_cta_prominence(boxes, button_mask, rule_scores[6])
-
-        # Rule 7 — Reading Flow (top-important elements)
-        violations += self._check_reading_flow(boxes, rule_scores[7])
-
-        # Rule 8 — Heading Hierarchy (heading elements)
-        violations += self._check_heading_hierarchy(boxes, heading_levels, rule_scores[8])
+        # Rule 6 — Reading Flow (top-important elements)
+        violations += self._check_reading_flow(boxes, rule_scores[6])
 
         return violations
 
@@ -284,40 +273,6 @@ class IssueLocalizer:
                 ))
         return results
 
-    def _check_touch_target(
-        self,
-        boxes: torch.Tensor,
-        interactive_mask: torch.Tensor | None,
-        score: torch.Tensor,
-    ) -> list[ViolationInstance]:
-        """Per interactive element: flag those too small to tap."""
-        N = boxes.shape[0]
-        if interactive_mask is not None:
-            mask = interactive_mask[:N]
-            targets = boxes[mask]
-        else:
-            targets = boxes
-
-        results = []
-        for box in targets:
-            w = (box[2] - box[0]).item()
-            h = (box[3] - box[1]).item()
-            min_dim = min(w, h)
-            s = min(min_dim / TOUCH_TARGET_MIN_NORM, 1.0)
-            results.append(ViolationInstance(
-                bbox=box.tolist(),
-                rule_idx=5,
-                rule_name="touch_target",
-                score=s,
-                is_violation=s < 1.0,
-                severity=_severity(s),
-                description=(
-                    f"Touch target too small (min dim ≈ {min_dim:.3f} normalised, "
-                    f"need ≥ {TOUCH_TARGET_MIN_NORM:.3f} ≈ 44 px). Enlarge the element."
-                ) if s < 1.0 else "Touch target size OK.",
-            ))
-        return results
-
     def _check_cta_prominence(
         self,
         boxes: torch.Tensor,
@@ -348,7 +303,7 @@ class IssueLocalizer:
             s = min(ratio / 2.0, 1.0)
             results.append(ViolationInstance(
                 bbox=box.tolist(),
-                rule_idx=6,
+                rule_idx=5,
                 rule_name="cta_prominence",
                 score=s,
                 is_violation=s < self.threshold,
@@ -385,7 +340,7 @@ class IssueLocalizer:
                 s = max(1.0 - elem_cy / 0.4, 0.0) * score.item()
                 results.append(ViolationInstance(
                     bbox=box.tolist(),
-                    rule_idx=7,
+                    rule_idx=6,
                     rule_name="reading_flow",
                     score=s,
                     is_violation=True,
@@ -398,44 +353,3 @@ class IssueLocalizer:
                 ))
         return results
 
-    def _check_heading_hierarchy(
-        self,
-        boxes: torch.Tensor,
-        heading_levels: torch.Tensor | None,
-        score: torch.Tensor,
-    ) -> list[ViolationInstance]:
-        """Flag heading elements where level ordering is violated."""
-        if heading_levels is None:
-            return []
-
-        N = boxes.shape[0]
-        active = [(i, lv.item()) for i, lv in enumerate(heading_levels[:N]) if lv > 0]
-        if len(active) < 2:
-            return []
-
-        results = []
-        levels_only = [lv for _, lv in active]
-        sorted_levels = sorted(levels_only)
-
-        for j in range(1, len(sorted_levels)):
-            if sorted_levels[j] - sorted_levels[j - 1] > 1:
-                # Find the element with this level
-                skipped_level = sorted_levels[j]
-                for i, lv in active:
-                    if lv == skipped_level and i < N:
-                        box = boxes[i].tolist()
-                        s = score.item()
-                        results.append(ViolationInstance(
-                            bbox=box,
-                            rule_idx=8,
-                            rule_name="heading_hierarchy",
-                            score=s,
-                            is_violation=True,
-                            severity=_severity(s),
-                            description=(
-                                f"Heading level H{skipped_level} appears after "
-                                f"H{sorted_levels[j-1]} — level skipped. "
-                                "Maintain sequential heading order (H1→H2→H3)."
-                            ),
-                        ))
-        return results

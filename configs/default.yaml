@@ -10,40 +10,37 @@ model:
   max_ui_elements: 16
   gnn_layers: 2
   output_dim: 128
-  detector_backend: placeholder
+  max_visual_tokens: 256
+  detector_backend: yolo
   yolo_model_path: yolov8n.pt
   yolo_conf_threshold: 0.25
   yolo_iou_threshold: 0.7
 
 train:
-  batch_size: 8
+  batch_size: 4
   learning_rate: 0.0001
   epochs: 50
-  # Primary loss: layout quality score vs. ground-truth quality label
-  layout_quality_loss_weight: 1.0
-  # Auxiliary loss: per-rule scores can be supervised with rule annotations
-  rule_score_loss_weight: 0.5
+  ux_loss_weight: 1.0
+  layout_loss_weight: 0.5
+  attention_loss_weight: 0.5
   use_wandb: true
   wandb_project: CV project
 
 # Rule checker configuration
 rules:
-  n_rules: 9
-  touch_target_min_norm: 0.117   # 44px / 375px mobile width
+  n_rules: 7
   wcag_aa_contrast: 4.5
   whitespace_lo: 0.25
   whitespace_hi: 0.60
-  # Rule names (for logging / visualization)
+  # Rule names (must match definitions.py RULE_NAMES order)
   names:
     - contrast
     - whitespace
     - visual_balance
     - density
     - alignment
-    - touch_target
     - cta_prominence
     - reading_flow
-    - heading_hierarchy
   # Prior importance weights (sum not required to equal 1)
   weights:
     - 1.5   # contrast
@@ -51,7 +48,5 @@ rules:
     - 0.8   # visual_balance
     - 1.0   # density
     - 1.2   # alignment
-    - 1.5   # touch_target
     - 1.0   # cta_prominence
     - 0.8   # reading_flow
-    - 1.2   # heading_hierarchy

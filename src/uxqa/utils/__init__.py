@@ -1,2 +1,11 @@
-# utils package — visualization tools removed (not required for journal evaluation)
-# See ARCHITECTURE.md for evaluation protocol (Kendall's Tau, Spearman's rho, F1 per rule)
+from .visualizer import ViolationVisualizer
+from .metrics import kendall_tau, spearman_rho, pearson_r, mean_absolute_error, rule_f1
+
+__all__ = [
+    "ViolationVisualizer",
+    "kendall_tau",
+    "spearman_rho",
+    "pearson_r",
+    "mean_absolute_error",
+    "rule_f1",
+]

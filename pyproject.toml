@@ -9,8 +9,11 @@ description = "Multi-modal UX quality assessment scaffold"
 requires-python = ">=3.10"
 dependencies = [
   "torch>=2.2.0",
+  "torchvision>=0.17.0",
   "pyyaml>=6.0.1",
   "wandb>=0.17.0",
+  "scipy>=1.12.0",
+  "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]

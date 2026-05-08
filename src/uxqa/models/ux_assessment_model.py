@@ -119,6 +119,7 @@ class UXAssessmentModel(nn.Module):
             num_heads=c.num_heads,
             ff_dim=c.ff_dim,
             dropout=c.dropout,
+            max_visual_tokens=c.max_visual_tokens,
         )
 
         # ── Stage 6: Quality Head ──────────────────────────────────────────

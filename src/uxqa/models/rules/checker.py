@@ -230,7 +230,7 @@ def rule_density(boxes: torch.Tensor, max_elements: int = 16) -> torch.Tensor:
     boxes_b = _to_batch_boxes(boxes, max(boxes.shape[0] if boxes.dim() == 3 else 1, 1))
     B, N, _ = boxes_b.shape
     ratio = N / max(max_elements, 1)
-    score = (1.0 - ratio ** 2).clamp(0.0, 1.0)
+    score = max(0.0, min(1.0, 1.0 - ratio ** 2))
     return torch.full((B,), score, device=boxes.device, dtype=torch.float32)
 
 

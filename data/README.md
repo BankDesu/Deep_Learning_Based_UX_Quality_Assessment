@@ -1,37 +1,46 @@
 # Dataset Layout
 
-This project uses the following task-to-dataset mapping:
+This project uses **UICrit + RICO** for UX quality score training.
 
-- Layout detection: PubLayNet
-- UI detection (website): WebUI Dataset
-- Attention modeling: SALICON
-- UX score training: WDQD
-- UX evaluation benchmark: WebPage Aesthetics
+## Datasets
 
-Expected structure:
+| Dataset | Role | Source |
+|---------|------|--------|
+| UICrit | Annotations + quality ratings | https://github.com/google-research-datasets/uicrit |
+| RICO | Mobile UI screenshots | Kaggle / interactionmining.org/rico |
 
-- data/raw/publaynet/{images,annotations}
-- data/raw/webui/{images,annotations}
-- data/raw/salicon/{images,fixations,maps}
-- data/raw/wdqd/{images,labels}
-- data/raw/webpage_aesthetics/{images,labels}
-- data/manifests/*.csv
-- data/interim/*
-- data/processed/*
+## Expected structure
 
-Use configs/datasets.yaml as the canonical path map for loaders.
+```
+data/
+├── raw/
+│   ├── uicrit/
+│   │   └── uicrit_public.csv     ← cloned from GitHub
+│   └── rico/
+│       └── combined/
+│           └── <rico_id>.jpg     ← ~1,000 screenshots needed
+├── manifests/
+│   ├── uicrit_train.csv
+│   ├── uicrit_val.csv
+│   └── uicrit_test.csv
+└── interim/
+    └── ux_score_training/
+        ├── ux_score_training_train.jsonl
+        ├── ux_score_training_val.jsonl
+        └── ux_score_training_test.jsonl
+```
 
-## Download Datasets
+## Download
 
-1. Configure dataset sources in configs/dataset_sources.yaml.
-2. If you use Kaggle sources, authenticate first:
-	- create ~/.kaggle/kaggle.json from your Kaggle account API key
-	- run: chmod 600 ~/.kaggle/kaggle.json
-3. Run downloader:
-	- python3 scripts/download_datasets.py
+### UICrit (annotations)
+```bash
+git clone --depth 1 https://github.com/google-research-datasets/uicrit data/raw/uicrit
+```
 
-The downloader supports:
+### RICO (screenshots)
+Requires Kaggle credentials (`~/.kaggle/kaggle.json`):
+```bash
+kaggle datasets download -d <slug> -p data/raw/rico --unzip
+```
 
-- method: kaggle (requires kaggle CLI and credentials)
-- method: url (direct file download via curl)
-- method: manual (placeholder, prints instruction only)
+See `configs/dataset_sources.yaml` for the Kaggle slug once configured.
