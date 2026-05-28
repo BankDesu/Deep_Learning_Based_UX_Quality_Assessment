@@ -1,0 +1,1 @@
+- [Project data layout](project_data_layout.md) — UICrit+RICO paths, in-memory 80/10/10 split, manifests are stale

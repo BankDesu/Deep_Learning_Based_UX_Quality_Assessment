@@ -31,8 +31,8 @@ class TrainConfig:
     learning_rate: float = 1e-4
     epochs: int = 5
     ux_loss_weight: float = 1.0
-    layout_loss_weight: float = 0.5
-    attention_loss_weight: float = 0.5
+    rank_loss_weight: float = 5.0
+    rule_loss_weight: float = 0.05
     use_wandb: bool = True
     wandb_project: str = "CV project"
 
@@ -45,8 +45,12 @@ class AppConfig:
 
 def _apply_overrides(obj: Any, values: dict[str, Any]) -> Any:
     for key, value in values.items():
-        if hasattr(obj, key):
-            setattr(obj, key, value)
+        if not hasattr(obj, key):
+            raise ValueError(
+                f"Unknown config key {key!r} for {type(obj).__name__}. "
+                f"Allowed keys: {[f for f in obj.__slots__]}"
+            )
+        setattr(obj, key, value)
     return obj
 
 

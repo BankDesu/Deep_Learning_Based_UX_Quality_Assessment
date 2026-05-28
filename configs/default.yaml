@@ -21,8 +21,8 @@ train:
   learning_rate: 0.0001
   epochs: 50
   ux_loss_weight: 1.0
-  layout_loss_weight: 0.5
-  attention_loss_weight: 0.5
+  rank_loss_weight: 5.0
+  rule_loss_weight: 0.05
   use_wandb: true
   wandb_project: CV project
 

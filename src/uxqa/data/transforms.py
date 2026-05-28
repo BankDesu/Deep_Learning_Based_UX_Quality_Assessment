@@ -27,6 +27,25 @@ def train_transforms(image_size: int = 224) -> "T.Compose":
     ])
 
 
+def train_transforms_strong(image_size: int = 224) -> "T.Compose":
+    """Stronger augmentation for small datasets (800 samples).
+
+    Avoids aggressive spatial crops (UI layout matters) but adds
+    affine jitter, stronger color, and random erasing.
+    """
+    _check()
+    return T.Compose([
+        T.Resize((image_size, image_size)),
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomAffine(degrees=0, translate=(0.04, 0.04), shear=3),
+        T.ColorJitter(brightness=0.35, contrast=0.35, saturation=0.2, hue=0.05),
+        T.RandomGrayscale(p=0.05),
+        T.ToTensor(),
+        T.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+        T.RandomErasing(p=0.3, scale=(0.02, 0.10), ratio=(0.5, 2.0), value=0),
+    ])
+
+
 def val_transforms(image_size: int = 224) -> "T.Compose":
     _check()
     return T.Compose([

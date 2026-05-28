@@ -1,7 +1,28 @@
+"""
+Evaluate a saved checkpoint on any data split.
+
+Reports Kendall's τ, Spearman ρ, Pearson r, and MAE with 95% bootstrap CI.
+Saves per-image predictions to a CSV for qualitative analysis.
+
+Supports checkpoints from:
+  - train_j.py (SwinMLP, arch="swin_t_mlp")
+  - train_baselines.py (LinearProbeModel, arch stored in checkpoint)
+
+Usage
+-----
+  python scripts/eval.py --ckpt checkpoints/swin-j-<run>/best.pt
+  python scripts/eval.py --ckpt checkpoints/baselines/resnet50/best.pt
+  python scripts/eval.py --ckpt <path> --split val
+"""
+from __future__ import annotations
+
+import argparse
+import csv
 from pathlib import Path
 import sys
 
 import torch
+from torch import nn
 from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,85 +30,161 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from uxqa.config import load_config
 from uxqa.data.uicrit_dataset import UICritDataset
 from uxqa.data.transforms import val_transforms
-from uxqa.models import UXAssessmentModel
-from uxqa.models.rules.definitions import RULE_NAMES
 from uxqa.utils.metrics import (
-    kendall_tau, spearman_rho, pearson_r, mean_absolute_error, rule_f1,
+    kendall_tau, spearman_rho, pearson_r, mean_absolute_error, bootstrap_ci,
 )
 
 
-def run_eval(
-    checkpoint: str = "checkpoints/best.pt",
-    config_path: str = "configs/default.yaml",
-    uicrit_root: str = "data/raw/uicrit",
-    rico_root: str = "data/raw/rico",
-) -> None:
-    cfg = load_config(Path(config_path))
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
+# ── Model builders (standalone, no import of train scripts) ──────────────────
+
+def _build_swin_mlp(dropout: float = 0.0) -> nn.Module:
+    from torchvision.models import swin_t
+
+    class SwinMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            swin = swin_t(weights=None)
+            self.features = swin.features
+            self.norm = swin.norm
+            self.head = nn.Sequential(
+                nn.Linear(768, 256), nn.GELU(), nn.Dropout(dropout), nn.Linear(256, 1),
+            )
+        def forward(self, x):
+            feat = self.features(x)
+            feat = self.norm(feat)
+            feat = feat.mean(dim=(1, 2))
+            return torch.sigmoid(self.head(feat))
+
+    return SwinMLP()
+
+
+def _build_linear_probe(arch: str, dropout: float = 0.0) -> nn.Module:
+    from torchvision.models import (
+        resnet50, efficientnet_b0, efficientnet_b4, vit_b_16, swin_t,
+    )
+
+    _feat_dims = {
+        "resnet50": 2048, "efficientnet_b0": 1280, "efficientnet_b4": 1792,
+        "vit_b_16": 768,  "swin_t": 768,
+    }
+
+    class Probe(nn.Module):
+        def __init__(self, backbone, feat_dim):
+            super().__init__()
+            self.backbone = backbone
+            self.head = nn.Sequential(
+                nn.Linear(feat_dim, 256), nn.GELU(), nn.Dropout(dropout), nn.Linear(256, 1),
+            )
+        def forward(self, x):
+            with torch.no_grad():
+                feat = self.backbone(x)
+            return torch.sigmoid(self.head(feat))
+
+    if arch == "resnet50":
+        m = resnet50(weights=None); m.fc = nn.Identity()
+    elif arch == "efficientnet_b0":
+        m = efficientnet_b0(weights=None); m.classifier = nn.Identity()
+    elif arch == "efficientnet_b4":
+        m = efficientnet_b4(weights=None); m.classifier = nn.Identity()
+    elif arch == "vit_b_16":
+        m = vit_b_16(weights=None); m.heads = nn.Identity()
+    elif arch == "swin_t":
+        m = swin_t(weights=None); m.head = nn.Identity()
     else:
-        device = torch.device("cpu")
+        raise ValueError(f"Unknown arch: {arch}")
 
-    model = UXAssessmentModel(cfg.model).to(device)
-    ckpt = torch.load(checkpoint, map_location=device, weights_only=True)
+    return Probe(m, _feat_dims[arch])
+
+
+def load_model(ckpt_path: Path, arch_override: str | None, device: torch.device) -> tuple[nn.Module, dict]:
+    ckpt = torch.load(ckpt_path, map_location=device)
+    arch = arch_override or ckpt.get("arch")
+
+    # train_j.py checkpoints have an "args" dict but no "arch" key
+    if arch is None or arch == "swin_t_mlp":
+        model = _build_swin_mlp(dropout=0.0)
+    else:
+        model = _build_linear_probe(arch, dropout=0.0)
+
     model.load_state_dict(ckpt["model"])
-    model.eval()
-    print(
-        f"Loaded checkpoint: epoch={ckpt.get('epoch', '?')}  "
-        f"val_tau={ckpt.get('tau', float('nan')):.4f}"
-    )
+    model.to(device).eval()
+    return model, ckpt
 
-    test_ds = UICritDataset(
-        uicrit_root=uicrit_root,
-        rico_root=rico_root,
-        split="test",
-        transform=val_transforms(cfg.model.image_size),
-        image_size=(cfg.model.image_size, cfg.model.image_size),
-    )
-    loader = DataLoader(
-        test_ds, batch_size=cfg.train.batch_size, shuffle=False, num_workers=2
-    )
-    print(f"Test set: {len(test_ds)} samples")
 
-    preds_list, targets_list, rule_sc_list, rule_lb_list = [], [], [], []
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Evaluate a checkpoint on a data split")
+    p.add_argument("--ckpt", required=True, help="Path to best.pt checkpoint")
+    p.add_argument("--arch", default=None,
+                   help="Override arch (swin_t_mlp | resnet50 | efficientnet_b0 | "
+                        "efficientnet_b4 | vit_b_16 | swin_t)")
+    p.add_argument("--uicrit", default="data/raw/uicrit")
+    p.add_argument("--rico", default="data/raw/rico")
+    p.add_argument("--split", default="test", choices=["train", "val", "test"])
+    p.add_argument("--batch", type=int, default=16)
+    p.add_argument("--image-size", type=int, default=224)
+    p.add_argument("--n-boot", type=int, default=2000, help="Bootstrap iterations")
+    p.add_argument("--out", default=None,
+                   help="Predictions CSV path (default: <ckpt_dir>/predictions_<split>.csv)")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    ckpt_path = Path(args.ckpt)
+    model, ckpt = load_model(ckpt_path, args.arch, device)
+    print(f"Checkpoint : {ckpt_path}")
+    print(f"  epoch    : {ckpt.get('epoch', '?')}")
+    if "tau" in ckpt:
+        print(f"  val tau  : {ckpt['tau']:.4f}")
+
+    ds = UICritDataset(args.uicrit, args.rico, split=args.split,
+                       transform=val_transforms(args.image_size),
+                       image_size=(args.image_size, args.image_size))
+    loader = DataLoader(ds, batch_size=args.batch, shuffle=False,
+                        num_workers=2, pin_memory=True)
+    print(f"\nEvaluating on {args.split} split ({len(ds)} samples)...")
+
+    preds, targs, rico_ids = [], [], []
     with torch.no_grad():
         for batch in loader:
             x = batch["screenshot"].to(device)
-            out = model(x)
-            preds_list.append(out["quality_score"].cpu())
-            targets_list.append(batch["quality_score"].unsqueeze(1))
-            rule_sc_list.append(out["rule_scores"].cpu())
-            rule_lb_list.append(batch["rule_labels"])
+            y = batch["quality_score"].unsqueeze(1)
+            preds.append(model(x).cpu())
+            targs.append(y)
+            rico_ids.extend(batch.get("rico_id", ["?"] * len(y)))
 
-    preds_t   = torch.cat(preds_list)
-    targets_t = torch.cat(targets_list)
-    rule_sc   = torch.cat(rule_sc_list)
-    rule_lb   = torch.cat(rule_lb_list)
+    p = torch.cat(preds)
+    t = torch.cat(targs)
 
-    tau = kendall_tau(preds_t, targets_t)
-    rho = spearman_rho(preds_t, targets_t)
-    r   = pearson_r(preds_t, targets_t)
-    mae = mean_absolute_error(preds_t, targets_t)
-    f1  = rule_f1(rule_sc, rule_lb, rule_names=RULE_NAMES)
+    tau, tau_lo, tau_hi = bootstrap_ci(p, t, kendall_tau,    n_boot=args.n_boot)
+    rho, rho_lo, rho_hi = bootstrap_ci(p, t, spearman_rho,   n_boot=args.n_boot)
+    pr,  pr_lo,  pr_hi  = bootstrap_ci(p, t, pearson_r,      n_boot=args.n_boot)
+    mae = mean_absolute_error(p, t)
 
-    print("\n── Quality Score Correlation (Test) ──────────────────────")
-    print(f"  Kendall's Tau τ  : {tau:.4f}   (target > 0.30)")
-    print(f"  Spearman's ρ     : {rho:.4f}")
-    print(f"  Pearson r        : {r:.4f}")
-    print(f"  MAE              : {mae:.4f}")
-    print("\n── Per-Rule F1 (Test) ────────────────────────────────────")
-    print(f"  Macro Precision  : {f1['macro_precision']:.4f}")
-    print(f"  Macro Recall     : {f1['macro_recall']:.4f}")
-    print(f"  Macro F1         : {f1['macro_f1']:.4f}")
-    for name in RULE_NAMES:
-        print(f"  {name:<20} F1={f1[f'f1_{name}']:.4f}")
+    print(f"\n{'─'*58}")
+    print(f"  {'Metric':<18}  {'Value':>8}  {'95% CI':>22}")
+    print(f"  {'─'*18}  {'─'*8}  {'─'*22}")
+    print(f"  {'Kendall τ':<18}  {tau:>8.4f}  [{tau_lo:.4f}, {tau_hi:.4f}]")
+    print(f"  {'Spearman ρ':<18}  {rho:>8.4f}  [{rho_lo:.4f}, {rho_hi:.4f}]")
+    print(f"  {'Pearson r':<18}  {pr:>8.4f}  [{pr_lo:.4f}, {pr_hi:.4f}]")
+    print(f"  {'MAE':<18}  {mae:>8.4f}")
+    print(f"  {'pred std':<18}  {p.std().item():>8.4f}")
+    print(f"{'─'*58}")
+
+    out_path = Path(args.out) if args.out else ckpt_path.parent / f"predictions_{args.split}.csv"
+    with open(out_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["rico_id", "target", "predicted", "abs_error"])
+        for rid, tgt, pred in zip(rico_ids, t.squeeze().tolist(), p.squeeze().tolist()):
+            w.writerow([rid, f"{tgt:.6f}", f"{pred:.6f}", f"{abs(tgt - pred):.6f}"])
+    print(f"\nPredictions saved to {out_path}")
 
 
 if __name__ == "__main__":
-    run_eval()
+    main()

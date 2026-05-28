@@ -77,8 +77,10 @@ class RuleViolationHead(nn.Module):
         neural_quality  = self.quality_head(fused_cls)           # [B, 1]
         weighted_score  = (rule_scores * learned_weights).sum(dim=-1, keepdim=True)  # [B, 1]
 
-        # Hybrid: 50% learned neural quality, 50% weighted rule score
-        layout_quality = 0.5 * neural_quality + 0.5 * weighted_score
+        # Hybrid: 90% learned neural quality, 10% weighted rule score
+        # (rule_scores has no learnable params; keep its influence small so the
+        # quality signal is dominated by the trainable head.)
+        layout_quality = 0.9 * neural_quality + 0.1 * weighted_score
 
         return {
             "rule_scores":          rule_scores,      # [B, N_RULES] — interpretable

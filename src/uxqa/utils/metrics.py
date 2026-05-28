@@ -38,7 +38,7 @@ def pearson_r(pred: torch.Tensor, target: torch.Tensor) -> float:
 def pairwise_ranking_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
-    margin: float = 0.05,
+    margin: float = 0.15,
 ) -> torch.Tensor:
     """
     Pairwise ranking loss — directly optimises for Kendall's Tau.
@@ -63,6 +63,33 @@ def pairwise_ranking_loss(
 
 def mean_absolute_error(pred: torch.Tensor, target: torch.Tensor) -> float:
     return (pred.float() - target.float()).abs().mean().item()
+
+
+def bootstrap_ci(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    metric_fn,
+    n_boot: int = 1000,
+    ci: float = 0.95,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """Bootstrap percentile CI. Returns (point_estimate, lower, upper).
+
+    metric_fn must accept (pred, target) tensors and return a float.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    n = len(pred)
+    point = metric_fn(pred, target)
+    boot = []
+    for _ in range(n_boot):
+        idx = torch.from_numpy(rng.integers(0, n, size=n))
+        boot.append(metric_fn(pred[idx], target[idx]))
+    alpha = (1.0 - ci) / 2.0
+    lower = float(np.percentile(boot, 100 * alpha))
+    upper = float(np.percentile(boot, 100 * (1.0 - alpha)))
+    return point, lower, upper
 
 
 def rule_f1(

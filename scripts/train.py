@@ -162,6 +162,8 @@ def run_train(
             loss, losses = _compute_loss(
                 out, targets, quality_criterion, rule_criterion,
                 cfg.train.ux_loss_weight,
+                rank_w=cfg.train.rank_loss_weight,
+                rule_w=cfg.train.rule_loss_weight,
             )
 
             optimizer.zero_grad(set_to_none=True)
