@@ -212,3 +212,8 @@ data/processed/**
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Model weights / training checkpoints (too large for Git)
+*.pt
+*.pth
+*.ckpt
