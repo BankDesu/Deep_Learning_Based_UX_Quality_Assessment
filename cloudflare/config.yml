@@ -1,0 +1,7 @@
+tunnel: uxq-luminelyra
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: uxq.luminelyra.org
+    service: http://app:7860
+  - service: http_status:404

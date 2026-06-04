@@ -62,12 +62,15 @@ def _build_swin_mlp(dropout: float = 0.0) -> nn.Module:
 
 def _build_linear_probe(arch: str, dropout: float = 0.0) -> nn.Module:
     from torchvision.models import (
-        resnet50, efficientnet_b0, efficientnet_b4, vit_b_16, swin_t,
+        resnet50, efficientnet_b0, efficientnet_b4, efficientnet_v2_s,
+        vit_b_16, swin_t,
     )
 
     _feat_dims = {
         "resnet50": 2048, "efficientnet_b0": 1280, "efficientnet_b4": 1792,
+        "efficientnet_v2_s": 1280, "convnextv2_base": 1024,
         "vit_b_16": 768,  "swin_t": 768,
+        "dinov2_vits14": 384, "dinov2_vitb14": 768,
     }
 
     class Probe(nn.Module):
@@ -88,10 +91,28 @@ def _build_linear_probe(arch: str, dropout: float = 0.0) -> nn.Module:
         m = efficientnet_b0(weights=None); m.classifier = nn.Identity()
     elif arch == "efficientnet_b4":
         m = efficientnet_b4(weights=None); m.classifier = nn.Identity()
+    elif arch == "efficientnet_v2_s":
+        m = efficientnet_v2_s(weights=None); m.classifier = nn.Identity()
+    elif arch == "convnextv2_base":
+        try:
+            import timm
+        except ImportError as exc:
+            raise ImportError(
+                "convnextv2_base requires timm. Install with: pip install timm"
+            ) from exc
+        m = timm.create_model("convnextv2_base", pretrained=False, num_classes=0)
     elif arch == "vit_b_16":
         m = vit_b_16(weights=None); m.heads = nn.Identity()
     elif arch == "swin_t":
         m = swin_t(weights=None); m.head = nn.Identity()
+    elif arch in ("dinov2_vits14", "dinov2_vitb14"):
+        try:
+            import timm
+        except ImportError as exc:
+            raise ImportError("DINOv2 requires timm. pip install timm") from exc
+        tag = ("vit_small_patch14_dinov2.lvd142m" if arch == "dinov2_vits14"
+               else "vit_base_patch14_dinov2.lvd142m")
+        m = timm.create_model(tag, pretrained=False, num_classes=0, dynamic_img_size=True)
     else:
         raise ValueError(f"Unknown arch: {arch}")
 
@@ -99,8 +120,35 @@ def _build_linear_probe(arch: str, dropout: float = 0.0) -> nn.Module:
 
 
 def load_model(ckpt_path: Path, arch_override: str | None, device: torch.device) -> tuple[nn.Module, dict]:
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     arch = arch_override or ckpt.get("arch")
+
+    # MultiModalQualityModel checkpoints saved by train_multimodal.py
+    if "backbone" in ckpt and arch_override is None:
+        from uxqa.models.multimodal_quality_model import MultiModalQualityModel
+        from uxqa.models.structural_encoder import compute_structural_features
+        backbone = ckpt["backbone"]
+        ablation = ckpt.get("ablation", "full")
+        model = MultiModalQualityModel(backbone=backbone, mode="probe", pretrained=False)
+        model.load_state_dict(ckpt["model"])
+        model.to(device).eval()
+        # Re-apply ablation gate override for correct inference
+        if ablation == "visual-only":
+            def _fwd(img, return_gate=False):
+                feat_v  = model.visual_backbone(img)
+                score   = torch.sigmoid(model.visual_head(feat_v))
+                return (score, torch.ones(img.shape[0], 1, device=img.device)) if return_gate else score
+            model.forward = _fwd
+        elif ablation == "struct-only":
+            def _fwd(img, return_gate=False):
+                img_01 = model._denorm(img)
+                with torch.no_grad():
+                    sf = compute_structural_features(img_01)
+                score = torch.sigmoid(model.struct_head(sf))
+                return (score, torch.zeros(img.shape[0], 1, device=img.device)) if return_gate else score
+            model.forward = _fwd
+        print(f"  backbone={backbone}  mode={ckpt.get('mode','?')}  ablation={ablation}")
+        return model, ckpt
 
     # train_j.py checkpoints have an "args" dict but no "arch" key
     if arch is None or arch == "swin_t_mlp":
@@ -120,7 +168,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ckpt", required=True, help="Path to best.pt checkpoint")
     p.add_argument("--arch", default=None,
                    help="Override arch (swin_t_mlp | resnet50 | efficientnet_b0 | "
-                        "efficientnet_b4 | vit_b_16 | swin_t)")
+                        "efficientnet_b4 | efficientnet_v2_s | convnextv2_base | "
+                        "vit_b_16 | swin_t | dinov2_vits14 | dinov2_vitb14)")
     p.add_argument("--uicrit", default="data/raw/uicrit")
     p.add_argument("--rico", default="data/raw/rico")
     p.add_argument("--split", default="test", choices=["train", "val", "test"])
@@ -167,15 +216,16 @@ def main() -> None:
     pr,  pr_lo,  pr_hi  = bootstrap_ci(p, t, pearson_r,      n_boot=args.n_boot)
     mae = mean_absolute_error(p, t)
 
-    print(f"\n{'─'*58}")
+    sep = "-" * 58
+    print(f"\n{sep}")
     print(f"  {'Metric':<18}  {'Value':>8}  {'95% CI':>22}")
-    print(f"  {'─'*18}  {'─'*8}  {'─'*22}")
-    print(f"  {'Kendall τ':<18}  {tau:>8.4f}  [{tau_lo:.4f}, {tau_hi:.4f}]")
-    print(f"  {'Spearman ρ':<18}  {rho:>8.4f}  [{rho_lo:.4f}, {rho_hi:.4f}]")
+    print(f"  {'-'*18}  {'-'*8}  {'-'*22}")
+    print(f"  {'Kendall tau':<18}  {tau:>8.4f}  [{tau_lo:.4f}, {tau_hi:.4f}]")
+    print(f"  {'Spearman rho':<18}  {rho:>8.4f}  [{rho_lo:.4f}, {rho_hi:.4f}]")
     print(f"  {'Pearson r':<18}  {pr:>8.4f}  [{pr_lo:.4f}, {pr_hi:.4f}]")
     print(f"  {'MAE':<18}  {mae:>8.4f}")
     print(f"  {'pred std':<18}  {p.std().item():>8.4f}")
-    print(f"{'─'*58}")
+    print(sep)
 
     out_path = Path(args.out) if args.out else ckpt_path.parent / f"predictions_{args.split}.csv"
     with open(out_path, "w", newline="") as f:

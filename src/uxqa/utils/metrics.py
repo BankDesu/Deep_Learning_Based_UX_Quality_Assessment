@@ -92,6 +92,35 @@ def bootstrap_ci(
     return point, lower, upper
 
 
+def soft_rank_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    temperature: float = 0.1,
+) -> torch.Tensor:
+    """
+    Differentiable approximation of (1 – Spearman ρ).
+
+    Uses soft ranking via sigmoid pairwise comparisons so gradients flow
+    through the ranking objective directly. O(B²) — fine for batch ≤ 64.
+
+    temperature : lower = sharper soft-rank (closer to true rank), but
+                  vanishing gradients for distant pairs. 0.1 works well.
+    """
+    pred   = pred.view(-1).float()
+    target = target.view(-1).float()
+
+    diff_p = (pred.unsqueeze(1)   - pred.unsqueeze(0))   / temperature   # [B, B]
+    diff_t = (target.unsqueeze(1) - target.unsqueeze(0)) / temperature   # [B, B]
+
+    rank_p = torch.sigmoid(diff_p).sum(dim=1)   # soft rank [B]
+    rank_t = torch.sigmoid(diff_t).sum(dim=1)   # soft rank [B]
+
+    rp = rank_p - rank_p.mean()
+    rt = rank_t - rank_t.mean()
+    corr = (rp * rt).sum() / (rp.norm() * rt.norm() + 1e-8)
+    return 1.0 - corr   # minimize → maximize Spearman ρ
+
+
 def rule_f1(
     pred_scores: torch.Tensor,
     labels: torch.Tensor,

@@ -1,0 +1,93 @@
+======================================================================
+ดาวน์โหลดเองจากลิงก์ด้านล่าง (ต้องการ institutional access หรือเปิดในเบราว์เซอร์)
+บันทึกไฟล์ลงใน:  references/pdfs/
+======================================================================
+
+[02] Tractinsky et al. (2000) What is beautiful is usable — Interact. Comput.
+     ไฟล์: tractinsky_2000_beautiful_usable.pdf
+     URL:  https://doi.org/10.1016/S0953-5438(00)00031-7
+
+[03] Cyr et al. (2010) Colour appeal in website design — IJHCS
+     ไฟล์: cyr_2010_colour_appeal.pdf
+     URL:  https://doi.org/10.1016/j.ijhcs.2009.08.005
+
+[04] Google Play Store Statistics (Statista 2024) — ต้อง screenshot หรือ export
+     ไฟล์: google_play_statistics_2024.pdf
+     URL:  https://www.statista.com/statistics/276623/number-of-apps-available-in-leading-app-stores/
+
+[05] Muhammad & Yeasin (2024) GUI Component Detection — IEEE ACT (ต้องการ access)
+     ไฟล์: gui_component_yolo_2024.pdf
+     URL:  https://ieeexplore.ieee.org/document/10415929/
+
+[06] Chen et al. (2022) Object Detection in GUI Survey — ACM CS
+     ไฟล์: object_detection_gui_survey.pdf
+     URL:  https://dl.acm.org/doi/10.1145/3503252
+
+[09] Jiang et al. (2023) CLIP-based UI Understanding — ACM IUI
+     ไฟล์: clip_ui_understanding.pdf
+     URL:  https://dl.acm.org/doi/10.1145/3581641.3584038
+
+[11] Deka et al. (2017) RICO Dataset — ACM UIST (ต้องการ access)
+     ไฟล์: rico_dataset.pdf
+     URL:  https://dl.acm.org/doi/10.1145/3126594.3126651
+
+[14] Xiong et al. (2022) Accessibility Evaluation — IEEE ICSEA
+     ไฟล์: accessibility_mobile_apps.pdf
+     URL:  https://ieeexplore.ieee.org/document/9956022
+
+[15] Ramakrishnan et al. (2024) Visual Aesthetics of Mobile UIs — JBCS
+     ไฟล์: deep_learning_visual_aesthetics.pdf
+     URL:  https://journals-sol.sbc.org.br/index.php/jbcs/article/view/3255
+
+[16] Kim et al. (2022) AI-Driven Aesthetics Prediction — Cogn. Comput. Syst.
+     ไฟล์: ai_aesthetics_cnn.pdf
+     URL:  https://doi.org/10.1049/ccs2.12055
+
+[24] Muhammad & Yeasin (2020) Eigen-CAM — IJCNN / SpringerNature
+     ไฟล์: eigencam.pdf
+     URL:  https://link.springer.com/article/10.1007/s42979-021-00449-3
+
+[25] Kendall (1938) A New Measure of Rank Correlation — Biometrika (JSTOR)
+     ไฟล์: kendall_1938.pdf
+     URL:  https://www.jstor.org/stable/2332226
+
+[27] Efron & Tibshirani (1993) An Introduction to the Bootstrap — หนังสือ
+     ไฟล์: bootstrap_efron.pdf
+     URL:  https://www.amazon.com/Introduction-Bootstrap-Monographs-Statistics-Probability/dp/0412042312
+
+[32] Deng et al. (2017) Understanding Data Augmentation — DICTA
+     ไฟล์: data_augmentation_classification.pdf
+     URL:  https://ieeexplore.ieee.org/document/8227475
+
+[35] Reinecke & Nachtigall (2014) Quantifying Visual Complexity — CHI
+     ไฟล์: visual_complexity_web.pdf
+     URL:  https://dl.acm.org/doi/10.1145/2556288.2557020
+
+[36] Cawthon & Moere (2007) Aesthetic on Usability of Data Viz — IEEE IV
+     ไฟล์: aesthetic_usability_data_viz.pdf
+     URL:  https://ieeexplore.ieee.org/document/4272015
+
+[37] Harrison et al. (2012) Aesthetics and Utility in HCI — IJHCI
+     ไฟล์: aesthetics_utility_hci.pdf
+     URL:  https://doi.org/10.1080/10447318.2011.586927
+
+[38] Oulasvirta et al. (2020) Combinatorial Optimization of GUI — Proc. IEEE
+     ไฟล์: combinatorial_optimization_gui.pdf
+     URL:  https://ieeexplore.ieee.org/document/8978428
+
+[39] Deng et al. (2021) Aesthetic Image Harmonization — IEEE Trans. Cybern.
+     ไฟล์: aesthetic_image_harmonization.pdf
+     URL:  https://ieeexplore.ieee.org/document/9511292
+
+[40] Jiang et al. (2022) Aesthetics-Driven Image Synthesis — IEEE TCSVT
+     ไฟล์: aesthetics_image_synthesis.pdf
+     URL:  https://ieeexplore.ieee.org/document/9705562
+
+[41] Ko et al. (2023) UI Aesthetic Score Prediction — KIISE (ภาษาเกาหลี)
+     ไฟล์: ui_aesthetic_score_kiise.pdf
+     URL:  https://www.dbpia.co.kr/
+
+[46] Jiang et al. (2021) LayerCAM — IEEE TIP (doi:10.1109/TIP.2021.3089943)
+     ไฟล์: layercam.pdf
+     URL:  https://ieeexplore.ieee.org/document/9462463
+

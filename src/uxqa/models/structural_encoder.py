@@ -1,15 +1,15 @@
 """
 PixelStructureEncoder — interpretable layout feature extractor.
 
-Computes 18 handcrafted features directly from screenshot pixels without
+Computes 19 handcrafted features directly from screenshot pixels without
 requiring UI hierarchy annotations or external detectors. Features are
 grouped into two categories:
 
   Pixel Rules (5)   — from pixel_rules.py (contrast, whitespace, balance,
                        simplicity, reading_flow)
-  Extended (13)     — color diversity, saturation, vertical symmetry,
+  Extended (14)     — color diversity, saturation, vertical symmetry,
                        3x3 spatial grid edge density (9), global lum std,
-                       horizontal band edge density (3)
+                       and luminance variance
 
 All features are in [0, 1] after normalization. The encoder projects the
 concatenated feature vector to a dense embedding via a small MLP.
@@ -22,7 +22,7 @@ from torch import nn
 
 from ..utils.pixel_rules import compute_pixel_rules
 
-N_STRUCT_FEATURES = 18
+N_STRUCT_FEATURES = 19
 
 
 def _luminance(img: torch.Tensor) -> torch.Tensor:
@@ -120,7 +120,7 @@ def _global_lum_std(img: torch.Tensor) -> torch.Tensor:
 
 def compute_structural_features(img: torch.Tensor) -> torch.Tensor:
     """
-    Compute all 18 structural layout features.
+    Compute all 19 structural layout features.
 
     Parameters
     ----------
@@ -128,7 +128,7 @@ def compute_structural_features(img: torch.Tensor) -> torch.Tensor:
 
     Returns
     -------
-    feats : FloatTensor [B, 18]  all values in [0, 1]
+    feats : FloatTensor [B, 19]  all values in [0, 1]
     """
     pixel_feats = compute_pixel_rules(img)                    # [B, 5]
     color_div   = _color_diversity(img).unsqueeze(1)          # [B, 1]
@@ -144,12 +144,8 @@ def compute_structural_features(img: torch.Tensor) -> torch.Tensor:
         sat_std.unsqueeze(1),            # 1
         vsym,                            # 1
         grid_dens,                       # 9
-        lum_std,                         # 1 — total: 19 (add reading_flow zone = 18 actually)
+        lum_std,                         # 1
     ], dim=1)                            # [B, 19]
-
-
-# Actual feature count after concatenation above
-N_STRUCT_FEATURES = 19
 
 
 class PixelStructureEncoder(nn.Module):

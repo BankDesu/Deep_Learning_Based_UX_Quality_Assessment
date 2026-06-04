@@ -7,18 +7,23 @@ also evaluates on the test split so results are directly reportable.
 
 Architectures supported
 -----------------------
-  resnet50, efficientnet_b0, efficientnet_b4, vit_b_16, swin_t
+  resnet50, efficientnet_b0, efficientnet_b4, efficientnet_v2_s,
+  convnextv2_base, vit_b_16, swin_t,
+  dinov2_vits14, dinov2_vitb14          ← new: self-supervised DINOv2
 
 Usage
 -----
   # Single architecture
-  python scripts/train_baselines.py --arch swin_t
+  python scripts/train_baselines.py --arch dinov2_vits14
 
   # All architectures sequentially (for paper Table 2)
   python scripts/train_baselines.py --arch all --epochs 20
 
   # Custom subset
-  python scripts/train_baselines.py --arch resnet50 vit_b_16 swin_t
+  python scripts/train_baselines.py --arch efficientnet_b4 dinov2_vits14
+
+  # Disable strong augmentation (not recommended for small datasets)
+  python scripts/train_baselines.py --arch all --no-strong-aug
 """
 from __future__ import annotations
 
@@ -47,59 +52,108 @@ from uxqa.utils.metrics import (
     pearson_r,
     mean_absolute_error,
     pairwise_ranking_loss,
+    soft_rank_loss,
     bootstrap_ci,
 )
 
-ALL_ARCHS = ["resnet50", "efficientnet_b0", "efficientnet_b4", "efficientnet_v2_s", "vit_b_16", "swin_t"]
+ALL_ARCHS = [
+    "resnet50",
+    "efficientnet_b0",
+    "efficientnet_b4",
+    "efficientnet_v2_s",
+    "convnextv2_base",
+    "vit_b_16",
+    "swin_t",
+    "dinov2_vits14",
+    "dinov2_vitb14",
+]
 
-# (feat_dim, trainable_params_approx)
 _ARCH_META: dict[str, int] = {
     "resnet50": 2048,
     "efficientnet_b0": 1280,
     "efficientnet_b4": 1792,
     "efficientnet_v2_s": 1280,
+    "convnextv2_base": 1024,
     "vit_b_16": 768,
     "swin_t": 768,
+    "dinov2_vits14": 384,
+    "dinov2_vitb14": 768,
 }
 
 
-def _build_backbone(arch: str) -> tuple[nn.Module, int]:
+def _build_backbone(arch: str, pretrained: bool = True) -> tuple[nn.Module, int]:
     """Returns (backbone with classifier removed, feature_dim). Backbone fully frozen."""
     if arch == "resnet50":
         from torchvision.models import resnet50, ResNet50_Weights
-        m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2 if pretrained else None)
         feat_dim = m.fc.in_features
         m.fc = nn.Identity()
 
     elif arch == "efficientnet_b0":
         from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
-        m = efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
+        m = efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None)
         feat_dim = m.classifier[1].in_features
         m.classifier = nn.Identity()
 
     elif arch == "efficientnet_b4":
         from torchvision.models import efficientnet_b4, EfficientNet_B4_Weights
-        m = efficientnet_b4(weights=EfficientNet_B4_Weights.IMAGENET1K_V1)
+        m = efficientnet_b4(weights=EfficientNet_B4_Weights.IMAGENET1K_V1 if pretrained else None)
         feat_dim = m.classifier[1].in_features
         m.classifier = nn.Identity()
 
     elif arch == "efficientnet_v2_s":
         from torchvision.models import efficientnet_v2_s, EfficientNet_V2_S_Weights
-        m = efficientnet_v2_s(weights=EfficientNet_V2_S_Weights.IMAGENET1K_V1)
+        m = efficientnet_v2_s(weights=EfficientNet_V2_S_Weights.IMAGENET1K_V1 if pretrained else None)
         feat_dim = m.classifier[1].in_features
         m.classifier = nn.Identity()
 
+    elif arch == "convnextv2_base":
+        try:
+            import timm
+        except ImportError as exc:
+            raise ImportError(
+                "convnextv2_base requires timm. Install with: pip install timm"
+            ) from exc
+        m = timm.create_model("convnextv2_base", pretrained=pretrained, num_classes=0)
+        feat_dim = m.num_features
+
     elif arch == "vit_b_16":
         from torchvision.models import vit_b_16, ViT_B_16_Weights
-        m = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
+        m = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if pretrained else None)
         feat_dim = m.heads.head.in_features
         m.heads = nn.Identity()
 
     elif arch == "swin_t":
         from torchvision.models import swin_t, Swin_T_Weights
-        m = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
+        m = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1 if pretrained else None)
         feat_dim = m.head.in_features
         m.head = nn.Identity()
+
+    elif arch == "dinov2_vits14":
+        try:
+            import timm
+        except ImportError as exc:
+            raise ImportError("dinov2_vits14 requires timm. pip install timm") from exc
+        m = timm.create_model(
+            "vit_small_patch14_dinov2.lvd142m",
+            pretrained=pretrained,
+            num_classes=0,
+            dynamic_img_size=True,
+        )
+        feat_dim = m.num_features  # 384
+
+    elif arch == "dinov2_vitb14":
+        try:
+            import timm
+        except ImportError as exc:
+            raise ImportError("dinov2_vitb14 requires timm. pip install timm") from exc
+        m = timm.create_model(
+            "vit_base_patch14_dinov2.lvd142m",
+            pretrained=pretrained,
+            num_classes=0,
+            dynamic_img_size=True,
+        )
+        feat_dim = m.num_features  # 768
 
     else:
         raise ValueError(f"Unknown arch: {arch}. Choose from {ALL_ARCHS}")
@@ -110,10 +164,10 @@ def _build_backbone(arch: str) -> tuple[nn.Module, int]:
 
 
 class LinearProbeModel(nn.Module):
-    def __init__(self, arch: str, dropout: float = 0.5) -> None:
+    def __init__(self, arch: str, dropout: float = 0.5, pretrained: bool = True) -> None:
         super().__init__()
         self.arch = arch
-        self.backbone, feat_dim = _build_backbone(arch)
+        self.backbone, feat_dim = _build_backbone(arch, pretrained=pretrained)
         self.head = nn.Sequential(
             nn.Linear(feat_dim, 256),
             nn.GELU(),
@@ -166,15 +220,17 @@ def train_one(
     ux_weight: float,
     rank_weight: float,
     rank_margin: float,
+    spearman_weight: float,
     patience: int,
     dropout: float,
     ckpt_root: Path,
+    pretrained: bool,
 ) -> dict:
     print(f"\n{'='*72}")
     print(f"  Arch: {arch}  (linear probe, frozen backbone + MLP head)")
     print(f"{'='*72}")
 
-    model = LinearProbeModel(arch, dropout=dropout).to(device)
+    model = LinearProbeModel(arch, dropout=dropout, pretrained=pretrained).to(device)
     n_head = sum(p.numel() for p in model.head.parameters())
     print(f"  trainable params (head only): {n_head:,}")
 
@@ -201,7 +257,11 @@ def train_one(
             x = batch["screenshot"].to(device)
             y = batch["quality_score"].unsqueeze(1).to(device)
             pred = model(x)
-            loss = ux_weight * mse(pred, y) + rank_weight * pairwise_ranking_loss(pred, y, margin=rank_margin)
+            loss = (
+                ux_weight    * mse(pred, y)
+                + rank_weight    * pairwise_ranking_loss(pred, y, margin=rank_margin)
+                + spearman_weight * soft_rank_loss(pred, y)
+            )
             optim.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(model.head.parameters(), max_norm=1.0)
@@ -215,7 +275,8 @@ def train_one(
         if is_best:
             best_tau = tau
             patience_counter = 0
-            torch.save({"epoch": epoch, "model": model.state_dict(), "tau": tau, "arch": arch},
+            torch.save({"epoch": epoch, "model": model.state_dict(), "tau": tau,
+                        "arch": arch, "pretrained": pretrained},
                        ckpt_dir / "best.pt")
         else:
             patience_counter += 1
@@ -262,10 +323,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ux-weight", type=float, default=0.1)
     p.add_argument("--rank-weight", type=float, default=5.0)
     p.add_argument("--rank-margin", type=float, default=0.15)
+    p.add_argument("--spearman-weight", type=float, default=1.0,
+                   help="Weight for soft Spearman rank loss (0 to disable)")
+    p.add_argument("--no-strong-aug", action="store_true",
+                   help="Use basic augmentation instead of strong (not recommended for small datasets)")
     p.add_argument("--patience", type=int, default=5)
     p.add_argument("--image-size", type=int, default=224)
     p.add_argument("--ckpt-root", default="checkpoints/baselines",
                    help="Root directory for baseline checkpoints")
+    p.add_argument("--no-pretrained", action="store_true",
+                   help="Initialize backbone randomly. Use only for smoke tests.")
     return p.parse_args()
 
 
@@ -279,8 +346,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     image_size = args.image_size
 
+    from uxqa.data.transforms import train_transforms_strong
+    aug = train_transforms(image_size) if args.no_strong_aug else train_transforms_strong(image_size)
+    if not args.no_strong_aug:
+        print("  Using strong augmentation (--no-strong-aug to disable)")
+
     train_ds = UICritDataset(args.uicrit, args.rico, split="train",
-                             transform=train_transforms(image_size),
+                             transform=aug,
                              image_size=(image_size, image_size))
     val_ds   = UICritDataset(args.uicrit, args.rico, split="val",
                              transform=val_transforms(image_size),
@@ -308,9 +380,11 @@ def main() -> None:
             ux_weight=args.ux_weight,
             rank_weight=args.rank_weight,
             rank_margin=args.rank_margin,
+            spearman_weight=args.spearman_weight,
             patience=args.patience,
             dropout=args.dropout,
             ckpt_root=ckpt_root,
+            pretrained=not args.no_pretrained,
         )
         results.append(r)
 

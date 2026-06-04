@@ -137,6 +137,9 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+
+# Cloudflare Tunnel credentials (sensitive)
+cloudflare/credentials.json
 .venv
 env/
 venv/

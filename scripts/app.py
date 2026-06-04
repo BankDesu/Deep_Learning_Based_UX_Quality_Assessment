@@ -4,7 +4,7 @@ Gradio web demo for UX Quality Assessment.
 Upload any mobile screenshot → get:
   - Predicted quality score (0-100%)
   - Quality tier label (Poor / Fair / Good / Excellent)
-  - Grad-CAM attention heatmap
+    - Grad-CAM explanation heatmap (post-hoc model focus)
   - 19 structural feature breakdown
 
 Usage
@@ -41,6 +41,7 @@ if str(SRC) not in sys.path:
 
 from uxqa.utils.pixel_rules import PIXEL_RULE_NAMES
 from uxqa.models.structural_encoder import compute_structural_features
+from uxqa.utils.visualizer import compute_layercam
 
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD  = [0.229, 0.224, 0.225]
@@ -62,38 +63,63 @@ QUALITY_TIERS = [
 
 # ── Model ────────────────────────────────────────────────────────────────────
 
-class _DemoModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        from torchvision.models import efficientnet_b4, EfficientNet_B4_Weights
-        base = efficientnet_b4(weights=None)
-        feat_dim = base.classifier[1].in_features
-        base.classifier = torch.nn.Identity()
-        self.backbone = base
-        self.head = torch.nn.Sequential(
-            torch.nn.Linear(feat_dim, 256),
-            torch.nn.GELU(),
-            torch.nn.Dropout(0.5),
-            torch.nn.Linear(256, 1),
-        )
-
-    def forward(self, x):
-        return torch.sigmoid(self.head(self.backbone(x)))
-
-
-_model: _DemoModel | None = None
+_model = None
 _device: torch.device | None = None
+_model_info: dict = {}   # stores backbone name, tau, etc. for UI display
 
 
-def _get_model(ckpt_path: Path) -> tuple[_DemoModel, torch.device]:
-    global _model, _device
+def _get_model(ckpt_path: Path) -> tuple:
+    global _model, _device, _model_info
     if _model is not None:
         return _model, _device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = _DemoModel().to(device)
-    ckpt = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(ckpt["model"])
-    model.eval()
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+
+    if "backbone" in ckpt and ckpt.get("ablation", "full") == "full":
+        # New: MultiModalQualityModel with learned gate fusion
+        from uxqa.models.multimodal_quality_model import MultiModalQualityModel
+        model = MultiModalQualityModel(
+            backbone=ckpt["backbone"], mode="probe", pretrained=False
+        )
+        model.load_state_dict(ckpt["model"])
+        _model_info = {
+            "name": "Learned Gate Fusion (MultiModal)",
+            "backbone": ckpt["backbone"],
+            "tau": 0.2227,
+            "ci": "[0.092, 0.351]",
+            "is_gate": True,
+        }
+    else:
+        # Legacy: EfficientNet-B4 linear probe
+        from torchvision.models import efficientnet_b4
+
+        class _LegacyProbe(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                base = efficientnet_b4(weights=None)
+                feat_dim = base.classifier[1].in_features
+                base.classifier = torch.nn.Identity()
+                self.backbone = base
+                self.head = torch.nn.Sequential(
+                    torch.nn.Linear(feat_dim, 256),
+                    torch.nn.GELU(),
+                    torch.nn.Dropout(0.5),
+                    torch.nn.Linear(256, 1),
+                )
+            def forward(self, x):
+                return torch.sigmoid(self.head(self.backbone(x)))
+
+        model = _LegacyProbe()
+        model.load_state_dict(ckpt["model"])
+        _model_info = {
+            "name": "EfficientNet-B4 linear probe (legacy)",
+            "backbone": "efficientnet_b4",
+            "tau": 0.215,
+            "ci": "[0.088, 0.344]",
+            "is_gate": False,
+        }
+
+    model.to(device).eval()
     _model, _device = model, device
     return model, device
 
@@ -101,66 +127,55 @@ def _get_model(ckpt_path: Path) -> tuple[_DemoModel, torch.device]:
 # ── Preprocessing ─────────────────────────────────────────────────────────────
 
 _transform = T.Compose([
-    T.Resize((224, 224)),
     T.ToTensor(),
     T.Normalize(_IMAGENET_MEAN, _IMAGENET_STD),
 ])
 
+def _letterbox(pil_img: Image.Image, size: int = 224) -> Image.Image:
+    img = pil_img.convert("RGB")
+    w, h = img.size
+    scale = min(size / w, size / h)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    resized = img.resize((nw, nh), Image.BILINEAR)
+    canvas = Image.new("RGB", (size, size), (127, 127, 127))
+    left = (size - nw) // 2
+    top = (size - nh) // 2
+    canvas.paste(resized, (left, top))
+    return canvas
+
+def _letterbox_params(w: int, h: int, size: int = 224) -> tuple[int, int, int, int]:
+    """Returns (nw, nh, left, top) — the valid content region in the letterboxed canvas."""
+    scale = min(size / w, size / h)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    left = (size - nw) // 2
+    top = (size - nh) // 2
+    return nw, nh, left, top
+
 def _preprocess(pil_img: Image.Image) -> torch.Tensor:
-    return _transform(pil_img.convert("RGB"))
+    return _transform(_letterbox(pil_img, size=224))
 
 
 # ── Multi-scale CAM ───────────────────────────────────────────────────────────
 
-def _norm(t: torch.Tensor) -> torch.Tensor:
-    return (t - t.min()) / (t.max() - t.min() + 1e-8)
 
 
 def _compute_gradcam(model, img_t: torch.Tensor, device: torch.device) -> np.ndarray:
-    """Multi-scale CAM: combines three layers for richer spatial coverage.
-      - features[-1] (7x7)  : head-weight CAM — semantic contribution per region
-      - features[-2] (7x7)  : activation energy — where the network fires strongly
-      - features[6]  (14x14): mid-level detail — finer spatial structure
+    """Thin wrapper — delegates to shared LayerCAM utility (same recipe as paper Fig. 5).
+
+    LayerCAM uses real per-element gradients on the 14×14 + 28×28 backbone layers,
+    giving sharp, element-aligned maps instead of the blurry 7×7 head-weight CAM.
     """
-    acts_last = [None]
-    acts_mid2 = [None]
-    acts_mid1 = [None]
-
-    def _h_last(_, __, out): acts_last[0] = out.detach()
-    def _h_mid2(_, __, out): acts_mid2[0] = out.detach()
-    def _h_mid1(_, __, out): acts_mid1[0] = out.detach()
-
-    h1 = model.backbone.features[-1].register_forward_hook(_h_last)
-    h2 = model.backbone.features[-2].register_forward_hook(_h_mid2)
-    h3 = model.backbone.features[5].register_forward_hook(_h_mid1)  # 14x14
-
-    x = img_t.unsqueeze(0).to(device)
-    with torch.no_grad():
-        model(x)
-    h1.remove(); h2.remove(); h3.remove()
-
-    # --- Layer 1: head-weight CAM (semantic, 7x7) ---
-    W_out    = model.head[3].weight          # [1, 256]
-    W_hidden = model.head[0].weight          # [256, feat_dim]
-    w = (W_out @ W_hidden).squeeze(0)        # [feat_dim]
-    A_last = acts_last[0].squeeze(0)         # [feat_dim, 7, 7]
-    cam1 = _norm((w.view(-1, 1, 1) * A_last).sum(dim=0))  # [7, 7]
-
-    # --- Layer 2: activation energy from features[-2] (7x7) ---
-    A_mid2 = acts_mid2[0].squeeze(0)         # [C, 7, 7]
-    cam2 = _norm((A_mid2 ** 2).mean(dim=0))  # [7, 7]
-
-    # --- Layer 3: activation energy from features[6] (14x14) ---
-    A_mid1 = acts_mid1[0].squeeze(0)         # [C, 14, 14]
-    cam3 = _norm((A_mid1 ** 2).mean(dim=0))  # [14, 14]
-
-    # Upsample all to 224x224 and blend
-    def _up(t):
-        return cv2.resize(t.detach().cpu().numpy(), (224, 224))
-
-    cam = 0.2 * _up(cam1) + 0.3 * _up(cam2) + 0.5 * _up(cam3)
-    cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
-    return cam
+    return compute_layercam(
+        model,
+        img_t,
+        device,
+        target_layers=(5, 3),
+        blend=(0.6, 0.4),
+        smooth_ksize=3,
+        clip_percentile=(20.0, 99.0),
+    )
 
 
 # ── Structural features ───────────────────────────────────────────────────────
@@ -177,21 +192,18 @@ def _compute_struct(img_t: torch.Tensor) -> np.ndarray:
 # ── Plot builders ─────────────────────────────────────────────────────────────
 
 def _plot_gradcam(pil_img: Image.Image, cam: np.ndarray) -> np.ndarray:
-    img_np = np.array(pil_img.resize((224, 224))) / 255.0
-    heatmap = plt.cm.jet(cam)[:, :, :3]
+    img = pil_img.convert("RGB")
+    w, h = img.size
+    img_np = np.array(img) / 255.0
+
+    # Crop the valid content region from the CAM (strips letterbox padding)
+    nw, nh, left, top = _letterbox_params(w, h, size=224)
+    cam_valid = cam[top:top + nh, left:left + nw]
+    cam_resized = cv2.resize(cam_valid, (w, h))
+
+    heatmap = plt.cm.jet(cam_resized)[:, :, :3]
     overlay = (0.55 * img_np + 0.45 * heatmap).clip(0, 1)
-
-    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-    axes[0].imshow(img_np);  axes[0].axis("off"); axes[0].set_title("Original", fontsize=11)
-    axes[1].imshow(overlay); axes[1].axis("off"); axes[1].set_title("Grad-CAM Attention", fontsize=11)
-    fig.tight_layout(pad=1.0)
-
-    fig.canvas.draw()
-    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
-    w, h = fig.canvas.get_width_height()
-    buf = buf.reshape(h, w, 4)[..., :3]
-    plt.close(fig)
-    return buf
+    return (overlay * 255).astype(np.uint8)
 
 
 def _plot_struct(feats: np.ndarray) -> np.ndarray:
@@ -226,10 +238,32 @@ def _plot_struct(feats: np.ndarray) -> np.ndarray:
 # ── Main inference function ───────────────────────────────────────────────────
 
 def _ckpt_path() -> Path:
-    candidates = list(Path("checkpoints").glob("baselines/efficientnet_b4/best.pt"))
-    if not candidates:
-        raise FileNotFoundError("Checkpoint not found. Run train_baselines.py first.")
-    return candidates[0]
+    # Priority 1: Learned Gate Fusion (best model, τ=0.2227)
+    for p in sorted(Path("checkpoints").glob("multimodal-efficientnet_b4-probe-*/best.pt"),
+                    reverse=True):
+        try:
+            c = torch.load(p, map_location="cpu", weights_only=False)
+            if c.get("backbone") and c.get("ablation", "full") == "full":
+                return p
+        except Exception:
+            continue
+    # Priority 2: finetune gate fusion
+    for p in sorted(Path("checkpoints").glob("multimodal-efficientnet_b4-finetune-*/best.pt"),
+                    reverse=True):
+        try:
+            c = torch.load(p, map_location="cpu", weights_only=False)
+            if c.get("backbone") and c.get("ablation", "full") == "full":
+                return p
+        except Exception:
+            continue
+    # Priority 3: legacy linear probe
+    for p in [
+        Path("checkpoints/baselines-effb4-original/efficientnet_b4/best.pt"),
+        Path("checkpoints/baselines/efficientnet_b4/best.pt"),
+    ]:
+        if p.exists():
+            return p
+    raise FileNotFoundError("No checkpoint found. Run train_multimodal.py first.")
 
 
 CKPT: Path = None  # set at startup
@@ -237,15 +271,25 @@ CKPT: Path = None  # set at startup
 
 def predict_quality(image: Image.Image):
     if image is None:
-        return None, "Upload a screenshot to get started.", None
+        return None, None, "Upload a screenshot to get started.", None
 
     model, device = _get_model(CKPT)
     img_t = _preprocess(image)
 
-    # Score
+    # Score + optional gate value
     x = img_t.unsqueeze(0).to(device)
     with torch.no_grad():
-        score = model(x).item()
+        try:
+            score_t, alpha_t = model(x, return_gate=True)
+            score = score_t.item()
+            alpha = alpha_t.item()
+            gate_line = (
+                f"\n\n**Gate α = {alpha:.3f}** "
+                f"({'relies on visual' if alpha > 0.6 else 'balances both' if alpha > 0.4 else 'relies on structural'})"
+            )
+        except TypeError:
+            score = model(x).item()
+            gate_line = ""
 
     # Tier
     tier_label, tier_color = "Unknown", "#95a5a6"
@@ -257,23 +301,25 @@ def predict_quality(image: Image.Image):
     score_pct = score * 100
     score_md = (
         f"## Quality Score: **{score_pct:.1f}%**\n\n"
-        f"<span style='font-size:1.3em; color:{tier_color}'>● {tier_label}</span>\n\n"
-        f"| | |\n|---|---|\n"
+        f"<span style='font-size:1.3em; color:{tier_color}'>● {tier_label}</span>"
+        f"{gate_line}\n\n"
+        f"| Tier | Range |\n|---|---|\n"
         f"| Poor | 0–30% |\n"
         f"| Fair | 30–50% |\n"
         f"| Good | 50–70% |\n"
         f"| **Excellent** | 70–100% |"
     )
 
-    # Grad-CAM
+    # CAM + original image
     cam = _compute_gradcam(model, img_t, device)
-    gradcam_img = _plot_gradcam(image.resize((224, 224)), cam)
+    original_np = np.array(image.convert("RGB"))
+    gradcam_img = _plot_gradcam(image, cam)
 
     # Structural features
     feats = _compute_struct(img_t)
     struct_img = _plot_struct(feats)
 
-    return gradcam_img, score_md, struct_img
+    return original_np, gradcam_img, score_md, struct_img
 
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
@@ -282,14 +328,17 @@ def build_ui() -> "gr.Blocks":
     import gradio as gr
 
     with gr.Blocks(title="UX Quality Assessment") as demo:
+        info = _model_info
         gr.Markdown(
-            """
+            f"""
             # UX Quality Assessment
             **Deep Learning-Based UX Quality Prediction from Mobile Screenshots**
 
             Upload a mobile app screenshot to receive an automated quality score
-            based on a model trained on human expert ratings (UICrit dataset).
-            Model: EfficientNet-B4 · Kendall τ = 0.201 · 95% CI [0.068, 0.321]
+            based on a model trained on human expert ratings (UICrit dataset, UIST 2024).
+
+            **Model:** {info.get('name','Learned Gate Fusion')} ·
+            Kendall τ = {info.get('tau', 0.2227):.3f} · 95% CI {info.get('ci','[0.092, 0.351]')}
             """
         )
 
@@ -305,11 +354,16 @@ def build_ui() -> "gr.Blocks":
                     elem_classes=["score-box"],
                 )
                 with gr.Tabs():
-                    with gr.Tab("Attention Map"):
-                        gradcam_out = gr.Image(
-                            label="What the model focuses on",
-                            show_label=False,
-                        )
+                    with gr.Tab("Grad-CAM Explanation"):
+                        with gr.Row(equal_height=True):
+                            original_out = gr.Image(
+                                label="Original",
+                                show_label=True,
+                            )
+                            gradcam_out = gr.Image(
+                                label="Grad-CAM",
+                                show_label=True,
+                            )
                     with gr.Tab("Structural Features"):
                         struct_out = gr.Image(
                             label="19 pixel-derived layout features",
@@ -319,15 +373,16 @@ def build_ui() -> "gr.Blocks":
         btn.click(
             fn=predict_quality,
             inputs=[inp],
-            outputs=[gradcam_out, score_out, struct_out],
+            outputs=[original_out, gradcam_out, score_out, struct_out],
         )
 
         gr.Markdown(
             """
             ---
             **How to interpret:**
-            - **Attention Map** — warmer colors (red/yellow) show regions that contribute most to the quality score (multi-scale: semantic + spatial detail)
+            - **Grad-CAM Explanation** — post-hoc interpretability map; warmer colors (red/yellow) show regions that contribute most to the quality score (head-weight CAM). Not a model input — explanation only.
             - **Structural Features** — blue bars ≥ 0.5 indicate well-designed layout properties
+            - **Gate α** — learned weight (0–1): α≈1 means the model relies on visual features; α≈0 means structural features dominate
             - Score is calibrated against UICrit human ratings (1–7 scale, normalized to 0–1)
             """
         )
@@ -364,9 +419,10 @@ def main():
     import gradio as gr
     ui = build_ui()
     ui.launch(
+        server_name="0.0.0.0",
         server_port=args.port,
         share=args.share,
-        inbrowser=True,
+        inbrowser=False,
         theme=gr.themes.Soft(),
     )
 

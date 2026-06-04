@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import json
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -281,6 +282,10 @@ class UICritDataset(Dataset):
         seed: int,
     ) -> list[dict[str, Any]]:
         """Load, group, filter to existing screenshots, then split."""
+        manifest_items = self._load_manifest_split()
+        if manifest_items is not None:
+            return manifest_items
+
         rows = self._load_csv()
         all_items = self._group_by_rico_id(rows)
 
@@ -313,6 +318,54 @@ class UICritDataset(Dataset):
             chosen = indices[n_train + n_val :]
 
         return [valid[i] for i in chosen]
+
+    def _load_manifest_split(self) -> list[dict[str, Any]] | None:
+        """Load an explicit split manifest when available.
+
+        The repository ships UICrit manifests used by the paper experiments.
+        Prefer them over re-shuffling the CSV so training/evaluation scripts
+        reproduce the documented split exactly.
+        """
+        manifest_path = Path("data") / "manifests" / f"uicrit_{self.split}.csv"
+        if not manifest_path.exists():
+            return None
+
+        items: list[dict[str, Any]] = []
+        with open(manifest_path, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                img_path = Path(row["image_path"])
+                if not img_path.is_absolute():
+                    img_path = Path.cwd() / img_path
+                if not img_path.exists():
+                    continue
+
+                meta_raw = row.get("meta") or "{}"
+                try:
+                    meta = json.loads(meta_raw)
+                except json.JSONDecodeError:
+                    meta = {}
+
+                rating = meta.get("ux_score", meta.get("design_quality_rating", 4.0))
+                quality_score = (float(rating) - self._QUALITY_MIN) / (
+                    self._QUALITY_MAX - self._QUALITY_MIN
+                )
+
+                comments = meta.get("raw_comments", [])
+                if isinstance(comments, str):
+                    comments = [comments]
+
+                items.append({
+                    "rico_id": str(row["id"]),
+                    "quality_score": float(quality_score),
+                    "comments": comments,
+                    "img_path": img_path,
+                })
+
+        if not items:
+            raise RuntimeError(
+                f"Manifest found but no valid images were loaded: {manifest_path}"
+            )
+        return items
 
     # ------------------------------------------------------------------
     # Dataset interface

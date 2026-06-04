@@ -24,7 +24,9 @@ image.save("result.png")
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 try:
@@ -34,6 +36,316 @@ except ImportError:
     _PIL_AVAILABLE = False
 
 from ..models.rules.localizer import ViolationInstance
+
+
+# ---------------------------------------------------------------------------
+# compute_cam — shared multi-scale head-weight CAM
+# ---------------------------------------------------------------------------
+
+def _get_backbone(model: torch.nn.Module) -> torch.nn.Module:
+    return getattr(model, 'visual_backbone', None) or model.backbone
+
+
+def _get_head(model: torch.nn.Module) -> torch.nn.Module:
+    return getattr(model, 'visual_head', None) or model.head
+
+
+def _norm_np(arr: np.ndarray) -> np.ndarray:
+    lo, hi = arr.min(), arr.max()
+    return (arr - lo) / (hi - lo + 1e-8)
+
+
+def _postprocess_cam(
+    cam: np.ndarray,
+    out_size: int,
+    smooth_ksize: int,
+    smooth_sigma: float,
+    clip_percentile: tuple[float, float] | None,
+    edge_taper: float,
+    edge_power: float,
+    edge_margin: float,
+) -> np.ndarray:
+    import cv2
+
+    if cam.shape[0] != out_size or cam.shape[1] != out_size:
+        cam = cv2.resize(cam, (out_size, out_size))
+
+    if smooth_ksize and smooth_ksize > 1:
+        k = smooth_ksize + 1 if smooth_ksize % 2 == 0 else smooth_ksize
+        cam = cv2.GaussianBlur(cam, (k, k), smooth_sigma)
+
+    taper = None
+    window = None
+    if edge_taper and edge_taper > 0:
+        taper = float(np.clip(edge_taper, 0.0, 1.0))
+        window = np.outer(np.hanning(out_size), np.hanning(out_size)).astype(np.float32)
+        if edge_power and edge_power > 1:
+            window = window ** float(edge_power)
+        cam = cam * ((1.0 - taper) + taper * window)
+
+    m = int(round(out_size * float(np.clip(edge_margin, 0.0, 0.25))))
+    inner = cam[m:out_size - m, m:out_size - m] if m * 2 < out_size else cam
+
+    if clip_percentile is None:
+        cam = (cam - inner.min()) / (inner.max() - inner.min() + 1e-8)
+    else:
+        lo, hi = np.percentile(inner, clip_percentile)
+        cam = (cam - lo) / (hi - lo + 1e-8)
+
+    if edge_taper and edge_taper > 0:
+        cam = cam * ((1.0 - taper) + taper * window)
+
+    if m > 0:
+        cam[:m, :] = 0.0
+        cam[-m:, :] = 0.0
+        cam[:, :m] = 0.0
+        cam[:, -m:] = 0.0
+
+    return np.clip(cam, 0.0, 1.0).astype(np.float32)
+
+
+def compute_cam(
+    model: torch.nn.Module,
+    img_t: torch.Tensor,
+    device: torch.device,
+    out_size: int = 224,
+    smooth_ksize: int = 7,
+    smooth_sigma: float = 0.0,
+    clip_percentile: tuple[float, float] | None = (5.0, 95.0),
+    edge_taper: float = 0.45,
+    edge_power: float = 2.0,
+    edge_margin: float = 0.06,
+) -> np.ndarray:
+    """Multi-scale head-weight CAM for EfficientNet-B4 based models.
+
+    Combines two feature layers weighted by the quality head's linear weights.
+    No backward pass required — avoids corner bias caused by frozen-backbone
+    Grad-CAM with GAP (spatially uniform gradients).
+
+    Blend weights:
+      80%  features[-1] 7×7   — head-weight CAM  (what the quality head cares about)
+      20%  features[5]  14×14 — head-weight CAM  (finer spatial detail)
+
+    Note: activation-energy terms (squared feature magnitudes) were removed because
+    they reflect backbone firing patterns, not quality-head decisions, and cause a
+    systematic top-right corner bias due to EfficientNet zero-padding artifacts.
+
+    Parameters
+    ----------
+    model    : MultiModalQualityModel or legacy linear probe
+    img_t    : FloatTensor [3, H, W] ImageNet-normalized
+    device   : torch device
+    out_size : output spatial resolution (square)
+    smooth_ksize   : Gaussian blur kernel size (odd). 0/1 disables smoothing.
+    smooth_sigma   : Gaussian blur sigma (0 = auto)
+    clip_percentile: robust normalization (lo, hi). None uses min-max.
+    edge_taper     : 0..1 cosine window blend to reduce corner bias
+    edge_power     : exponent for edge window (>=1 boosts edge suppression)
+    edge_margin    : hard mask ratio for borders (0..0.25 recommended)
+
+    Returns
+    -------
+    cam : float32 ndarray [out_size, out_size] in [0, 1]
+    """
+    import cv2
+
+    bb   = _get_backbone(model)
+    head = _get_head(model)
+
+    acts_last: list = [None]
+    acts_mid1: list = [None]
+
+    def _h_last(_, __, out): acts_last[0] = out.detach().cpu()
+    def _h_mid1(_, __, out): acts_mid1[0] = out.detach().cpu()
+
+    h1 = bb.features[-1].register_forward_hook(_h_last)
+    h3 = bb.features[5].register_forward_hook(_h_mid1)
+
+    x = img_t.unsqueeze(0).to(device)
+    with torch.no_grad():
+        model(x)
+    h1.remove(); h3.remove()
+
+    # Head weight vector: w = W_out @ W_hidden  [feat_dim]
+    W_out    = head[3].weight.detach().cpu()   # [1, 256]
+    W_hidden = head[0].weight.detach().cpu()   # [256, feat_dim]
+    w = (W_out @ W_hidden).squeeze(0)          # [feat_dim]
+
+    def _head_weight_cam(acts: torch.Tensor, w_vec: torch.Tensor) -> np.ndarray:
+        A = acts.squeeze(0)  # [C, H, W]
+        # Project w onto the channel dim of this layer (truncate or pad if needed)
+        c = A.shape[0]
+        wc = w_vec[:c] if c <= w_vec.shape[0] else torch.cat(
+            [w_vec, w_vec.new_zeros(c - w_vec.shape[0])]
+        )
+        # Subtract per-channel spatial mean so the CAM shows WHERE each channel
+        # is more active than its own average, removing static corner/padding biases
+        # from EfficientNet zero-padding and from dataset-level positional patterns
+        # (e.g. Android status bar always present at top-right of every screenshot).
+        A_centered = A - A.mean(dim=(1, 2), keepdim=True)
+        return _norm_np(torch.relu((wc.view(-1, 1, 1) * A_centered).sum(dim=0)).numpy())
+
+    # Layer 1: head-weight CAM on features[-1]  (7×7)
+    cam1 = _head_weight_cam(acts_last[0], w)
+
+    # Layer 2: head-weight CAM on features[5]   (14×14, finer detail)
+    cam3 = _head_weight_cam(acts_mid1[0], w)
+
+    def _up(arr: np.ndarray) -> np.ndarray:
+        return cv2.resize(arr, (out_size, out_size))
+
+    cam = 0.8 * _up(cam1) + 0.2 * _up(cam3)
+
+    return _postprocess_cam(
+        cam,
+        out_size=out_size,
+        smooth_ksize=smooth_ksize,
+        smooth_sigma=smooth_sigma,
+        clip_percentile=clip_percentile,
+        edge_taper=edge_taper,
+        edge_power=edge_power,
+        edge_margin=edge_margin,
+    )
+
+
+def compute_layercam(
+    model: torch.nn.Module,
+    img_t: torch.Tensor,
+    device: torch.device,
+    out_size: int = 224,
+    target_layers: tuple[int, ...] = (5, 3),
+    blend: tuple[float, ...] = (0.6, 0.4),
+    smooth_ksize: int = 3,
+    smooth_sigma: float = 0.0,
+    clip_percentile: tuple[float, float] | None = (20.0, 99.0),
+) -> np.ndarray:
+    """LayerCAM (Jiang et al., TIP 2021) for EfficientNet-B4 based models.
+
+    Unlike the 7×7 head-weight `compute_cam`, LayerCAM uses **real per-element
+    gradients** ∂score/∂A as spatial weights, so it can localize on high-resolution
+    intermediate layers without relying on the (mismatched) quality-head weights.
+    This yields sharp maps that track actual UI elements instead of blurry blobs.
+
+    Default blends two layers, both gradient-weighted (hence both valid):
+      features[5]  14×14  (semantic, weight 0.6)
+      features[3]  28×28  (fine detail, weight 0.4)
+
+    Requires a backward pass (grad-enabled); frozen backbone params are fine —
+    activation gradients still flow through the visual head → score path.
+
+    Returns
+    -------
+    cam : float32 ndarray [out_size, out_size] in [0, 1]
+    """
+    import cv2
+
+    bb = _get_backbone(model)
+    acts: dict[int, torch.Tensor] = {}
+    handles = []
+    for li in target_layers:
+        def _mk(layer_idx):
+            def _h(_, __, out):
+                out.retain_grad()
+                acts[layer_idx] = out
+            return _h
+        handles.append(bb.features[li].register_forward_hook(_mk(li)))
+
+    was_training = model.training
+    model.eval()
+    model.zero_grad(set_to_none=True)
+    x = img_t.unsqueeze(0).to(device).requires_grad_(True)
+    score = model(x)
+    if isinstance(score, tuple):
+        score = score[0]
+    score.sum().backward()
+    for h in handles:
+        h.remove()
+
+    cam_acc = np.zeros((out_size, out_size), dtype=np.float32)
+    for li, wgt in zip(target_layers, blend):
+        A = acts[li].detach().squeeze(0)          # [C, H, W]
+        G = acts[li].grad.detach().squeeze(0)     # [C, H, W]
+        # LayerCAM: positive gradient as per-element channel weight
+        cam = torch.relu((torch.relu(G) * A).sum(dim=0)).cpu().numpy()  # [H, W]
+        cam_acc += float(wgt) * cv2.resize(_norm_np(cam), (out_size, out_size))
+
+    if was_training:
+        model.train()
+
+    return _postprocess_cam(
+        cam_acc,
+        out_size=out_size,
+        smooth_ksize=smooth_ksize,
+        smooth_sigma=smooth_sigma,
+        clip_percentile=clip_percentile,
+        edge_taper=0.0,
+        edge_power=1.0,
+        edge_margin=0.0,
+    )
+
+
+def compute_eigencam(
+    model: torch.nn.Module,
+    img_t: torch.Tensor,
+    device: torch.device,
+    out_size: int = 224,
+    smooth_ksize: int = 7,
+    smooth_sigma: float = 0.0,
+    clip_percentile: tuple[float, float] | None = (5.0, 95.0),
+    edge_taper: float = 0.45,
+    edge_power: float = 2.0,
+    edge_margin: float = 0.06,
+) -> np.ndarray:
+    """Eigen-CAM using PCA of activation maps (no gradients required)."""
+    bb = _get_backbone(model)
+
+    acts_last: list = [None]
+
+    def _h_last(_, __, out):
+        acts_last[0] = out.detach().cpu()
+
+    h1 = bb.features[-1].register_forward_hook(_h_last)
+
+    x = img_t.unsqueeze(0).to(device)
+    with torch.no_grad():
+        model(x)
+    h1.remove()
+
+    A = acts_last[0].squeeze(0).numpy()  # [C, H, W]
+    A_centered = A - A.mean(axis=(1, 2), keepdims=True)
+    A_flat = A_centered.reshape(A_centered.shape[0], -1)
+    try:
+        U, _, _ = np.linalg.svd(A_flat, full_matrices=False)
+        w = U[:, 0]
+    except np.linalg.LinAlgError:
+        w = np.ones(A_flat.shape[0], dtype=A_flat.dtype)
+
+    cam = np.tensordot(w, A_centered, axes=(0, 0))  # [H, W], sign is arbitrary
+
+    # Orient the principal component so the highlighted region aligns with where
+    # the backbone actually fires (per-location activation energy). PCA sign is
+    # undefined, so without this the map flips randomly between images — causing
+    # "all-blue" heatmaps on low-variance screenshots (ReLU kills the wrong half)
+    # and inconsistent attention across samples.
+    energy = (A_centered ** 2).sum(axis=0)  # [H, W] >= 0
+    f = cam.ravel() - cam.mean()
+    e = energy.ravel() - energy.mean()
+    if float(np.dot(f, e)) < 0:
+        cam = -cam
+
+    cam = np.maximum(cam, 0.0)
+    cam = _norm_np(cam)
+
+    return _postprocess_cam(
+        cam,
+        out_size=out_size,
+        smooth_ksize=smooth_ksize,
+        smooth_sigma=smooth_sigma,
+        clip_percentile=clip_percentile,
+        edge_taper=edge_taper,
+        edge_power=edge_power,
+        edge_margin=edge_margin,
+    )
 
 
 # ---------------------------------------------------------------------------

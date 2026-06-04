@@ -1,20 +1,27 @@
 """
 Train MultiModalQualityModel (Visual + Structural gated fusion) on UICrit.
 
-Novel architecture for IEEE Access:
-  Visual Branch:     EfficientNet-B4 (ImageNet) frozen/partial-unfreeze
-  Structural Branch: PixelStructureEncoder (19 pixel-derived layout features)
-  Fusion:            Learned gated fusion → quality score
+Main model for IEEE Access:
+  Visual Branch:     DINOv2 ViT-S/14 (default) or any supported backbone
+  Structural Branch: 19 pixel-derived layout features → MLP head
+  Fusion:            Learned per-sample gate α
+                     score = sigmoid(α·logit_v + (1−α)·logit_s)
 
 Modes
 -----
-  probe    — freeze backbone; train structural encoder + fusion + head
-  finetune — unfreeze last 3 backbone blocks + full training
+  probe    — backbone fully frozen; train heads + gate only
+  finetune — unfreeze last N backbone blocks + full training
+
+Ablation
+--------
+  full         both branches (default)
+  visual-only  gate forced to α=1  → visual branch only
+  struct-only  gate forced to α=0  → structural branch only
 
 Usage
 -----
   python scripts/train_multimodal.py --mode probe
-  python scripts/train_multimodal.py --mode finetune
+  python scripts/train_multimodal.py --mode finetune --backbone dinov2_vitb14
   python scripts/train_multimodal.py --mode probe --ablation visual-only
   python scripts/train_multimodal.py --mode probe --ablation struct-only
 """
@@ -48,7 +55,7 @@ from uxqa.data.transforms import train_transforms, train_transforms_strong, val_
 from uxqa.models.multimodal_quality_model import MultiModalQualityModel
 from uxqa.utils.metrics import (
     kendall_tau, spearman_rho, pearson_r, mean_absolute_error,
-    pairwise_ranking_loss, bootstrap_ci,
+    pairwise_ranking_loss, soft_rank_loss, bootstrap_ci,
 )
 
 
@@ -58,7 +65,7 @@ def _fmt(secs: float) -> str:
     return f"{h}h {m:02d}m {s:02d}s" if h > 0 else f"{m}m {s:02d}s"
 
 
-def _evaluate(model, loader, device):
+def _evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
     model.eval()
     preds, targs = [], []
     with torch.no_grad():
@@ -70,30 +77,60 @@ def _evaluate(model, loader, device):
     return torch.cat(preds), torch.cat(targs)
 
 
+def _make_ablation_forward(model: MultiModalQualityModel, ablation: str):
+    """Wrap model.forward to force gate to 1 (visual-only) or 0 (struct-only)."""
+    if ablation == "visual-only":
+        def _fwd(img, return_gate=False):
+            feat_v  = model.visual_backbone(img)
+            logit_v = model.visual_head(feat_v)
+            score   = torch.sigmoid(logit_v)
+            return (score, torch.ones(img.shape[0], 1, device=img.device)) if return_gate else score
+        return _fwd
+
+    if ablation == "struct-only":
+        def _fwd(img, return_gate=False):
+            img_01   = model._denorm(img)
+            with torch.no_grad():
+                from uxqa.models.structural_encoder import compute_structural_features
+                struct_feats = compute_structural_features(img_01)
+            logit_s = model.struct_head(struct_feats)
+            score   = torch.sigmoid(logit_s)
+            return (score, torch.zeros(img.shape[0], 1, device=img.device)) if return_gate else score
+        return _fwd
+
+    return None  # full: use original forward
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description="Train Visual+Structural MultiModal model on UICrit"
     )
-    p.add_argument("--mode",     default="probe", choices=["probe", "finetune"])
-    p.add_argument("--ablation", default="full",
-                   choices=["full", "visual-only", "struct-only"],
-                   help="Ablation: full=both branches, visual-only, struct-only")
-    p.add_argument("--uicrit",  default="data/raw/uicrit")
-    p.add_argument("--rico",    default="data/raw/rico")
-    p.add_argument("--epochs",  type=int, default=30)
-    p.add_argument("--batch",   type=int, default=8)
-    p.add_argument("--head-lr",     type=float, default=1e-3)
-    p.add_argument("--backbone-lr", type=float, default=1e-5)
-    p.add_argument("--weight-decay",type=float, default=0.1)
-    p.add_argument("--dropout",     type=float, default=0.5)
+    p.add_argument("--backbone",  default="dinov2_vits14",
+                   choices=["dinov2_vits14", "dinov2_vitb14",
+                            "efficientnet_b4", "efficientnet_v2_s", "convnextv2_tiny"],
+                   help="Visual backbone (default: dinov2_vits14)")
+    p.add_argument("--mode",      default="probe", choices=["probe", "finetune"])
+    p.add_argument("--ablation",  default="full",
+                   choices=["full", "visual-only", "struct-only"])
+    p.add_argument("--uicrit",   default="data/raw/uicrit")
+    p.add_argument("--rico",     default="data/raw/rico")
+    p.add_argument("--epochs",   type=int, default=30)
+    p.add_argument("--batch",    type=int, default=8)
+    p.add_argument("--head-lr",      type=float, default=1e-3)
+    p.add_argument("--backbone-lr",  type=float, default=1e-5)
+    p.add_argument("--weight-decay", type=float, default=0.1)
+    p.add_argument("--dropout",      type=float, default=0.5)
     p.add_argument("--unfreeze-last-n", type=int, default=3)
-    p.add_argument("--ux-weight",   type=float, default=0.1)
-    p.add_argument("--rank-weight", type=float, default=5.0)
-    p.add_argument("--rank-margin", type=float, default=0.15)
-    p.add_argument("--patience",    type=int, default=7)
-    p.add_argument("--image-size",  type=int, default=224)
-    p.add_argument("--strong-aug",  action="store_true")
-    p.add_argument("--ckpt-dir",    default=None)
+    p.add_argument("--ux-weight",    type=float, default=0.1)
+    p.add_argument("--rank-weight",  type=float, default=5.0)
+    p.add_argument("--rank-margin",  type=float, default=0.15)
+    p.add_argument("--spearman-weight", type=float, default=1.0,
+                   help="Weight for soft Spearman loss (0 to disable)")
+    p.add_argument("--no-strong-aug", action="store_true",
+                   help="Use basic augmentation (not recommended for 800-sample dataset)")
+    p.add_argument("--patience",     type=int, default=7)
+    p.add_argument("--image-size",   type=int, default=224)
+    p.add_argument("--ckpt-dir",     default=None)
     return p.parse_args()
 
 
@@ -101,7 +138,7 @@ def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    tag = f"multimodal-{args.mode}"
+    tag = f"multimodal-{args.backbone}-{args.mode}"
     if args.ablation != "full":
         tag += f"-{args.ablation}"
     ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else (
@@ -109,10 +146,15 @@ def main():
     )
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"device={device}  mode={args.mode}  ablation={args.ablation}")
+    print(f"device={device}  backbone={args.backbone}  mode={args.mode}  ablation={args.ablation}")
     print(f"epochs={args.epochs}  batch={args.batch}  patience={args.patience}")
 
-    aug = train_transforms_strong(args.image_size) if args.strong_aug else train_transforms(args.image_size)
+    aug = train_transforms(args.image_size) if args.no_strong_aug else train_transforms_strong(args.image_size)
+    if not args.no_strong_aug:
+        print("  augmentation: strong (--no-strong-aug to use basic)")
+
+    nw = 0 if sys.platform == "win32" else 4
+    kw = dict(num_workers=nw, pin_memory=True)
     train_ds = UICritDataset(args.uicrit, args.rico, split="train",
                              transform=aug, image_size=(args.image_size, args.image_size))
     val_ds   = UICritDataset(args.uicrit, args.rico, split="val",
@@ -123,42 +165,21 @@ def main():
                              image_size=(args.image_size, args.image_size))
     print(f"train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
 
-    nw = 0 if sys.platform == "win32" else 4
-    kw = dict(num_workers=nw, pin_memory=True)
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,  drop_last=True, **kw)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False, **kw)
     test_loader  = DataLoader(test_ds,  batch_size=args.batch, shuffle=False, **kw)
 
     model = MultiModalQualityModel(
+        backbone=args.backbone,
         mode=args.mode,
         dropout=args.dropout,
         unfreeze_last_n=args.unfreeze_last_n,
     ).to(device)
 
-    # Ablation: zero out one branch by overriding forward
-    if args.ablation == "visual-only":
-        _orig_fwd = model.forward
-        def _visual_only_fwd(img, return_gate=False):
-            feat_v = model.visual_backbone(img)
-            # Route through proj_v + head without structural branch
-            fused = model.fusion.proj_v(feat_v)
-            score = torch.sigmoid(model.head(fused))
-            return (score, None) if return_gate else score
-        model.forward = _visual_only_fwd
-        print("  [ablation] visual-only: structural branch disabled")
-
-    elif args.ablation == "struct-only":
-        _orig_fwd = model.forward
-        def _struct_only_fwd(img, return_gate=False):
-            mean = img.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-            std  = img.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-            img_01 = (img * std + mean).clamp(0.0, 1.0)
-            feat_s = model.struct_encoder(img_01)
-            fused = model.fusion.proj_s(feat_s)
-            score = torch.sigmoid(model.head(fused))
-            return (score, None) if return_gate else score
-        model.forward = _struct_only_fwd
-        print("  [ablation] struct-only: visual backbone disabled")
+    ablation_fwd = _make_ablation_forward(model, args.ablation)
+    if ablation_fwd is not None:
+        model.forward = ablation_fwd
+        print(f"  [ablation] {args.ablation}: gate overridden")
 
     n_vis = sum(p.numel() for p in model.visual_params())
     n_nv  = sum(p.numel() for p in model.non_visual_params())
@@ -190,8 +211,11 @@ def main():
             x = batch["screenshot"].to(device)
             y = batch["quality_score"].unsqueeze(1).to(device)
             pred = model(x)
-            loss = (args.ux_weight * mse_fn(pred, y) +
-                    args.rank_weight * pairwise_ranking_loss(pred, y, margin=args.rank_margin))
+            loss = (
+                args.ux_weight       * mse_fn(pred, y)
+                + args.rank_weight   * pairwise_ranking_loss(pred, y, margin=args.rank_margin)
+                + args.spearman_weight * soft_rank_loss(pred, y)
+            )
             optim.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -210,7 +234,7 @@ def main():
             patience_counter = 0
             torch.save(
                 {"epoch": epoch, "model": model.state_dict(), "tau": tau,
-                 "mode": args.mode, "ablation": args.ablation},
+                 "backbone": args.backbone, "mode": args.mode, "ablation": args.ablation},
                 ckpt_dir / "best.pt",
             )
         else:
@@ -232,7 +256,7 @@ def main():
 
     csv_f.close()
     print(f"\n{'-'*60}")
-    print(f"Done - best val tau={best_tau:.4f}  total={_fmt(time.time()-t0)}")
+    print(f"Done — best val tau={best_tau:.4f}  total={_fmt(time.time()-t0)}")
 
     # Test evaluation
     ckpt = torch.load(ckpt_dir / "best.pt", map_location=device)
@@ -242,14 +266,11 @@ def main():
     rho_t = spearman_rho(p_test, t_test)
     mae_t = mean_absolute_error(p_test, t_test)
 
-    print(f"\nTEST RESULTS ({args.mode}, ablation={args.ablation})")
+    print(f"\nTEST RESULTS  backbone={args.backbone}  mode={args.mode}  ablation={args.ablation}")
     print(f"  tau = {tau_t:.4f}  95% CI [{tau_lo:.4f}, {tau_hi:.4f}]")
     print(f"  rho = {rho_t:.4f}")
     print(f"  MAE = {mae_t:.4f}")
-    print(f"\nCheckpoint: {ckpt_dir / 'best.pt'}")
-    print(f"\nAblation study commands:")
-    print(f"  python scripts/train_multimodal.py --mode probe --ablation visual-only")
-    print(f"  python scripts/train_multimodal.py --mode probe --ablation struct-only")
+    print(f"\nCheckpoint saved: {ckpt_dir / 'best.pt'}")
 
 
 if __name__ == "__main__":
