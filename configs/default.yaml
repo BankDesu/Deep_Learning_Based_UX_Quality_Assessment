@@ -1,0 +1,52 @@
+model:
+  image_size: 224
+  in_channels: 3
+  patch_size: 4
+  visual_embed_dim: 128
+  transformer_layers: 4
+  num_heads: 8
+  ff_dim: 512
+  dropout: 0.1
+  max_ui_elements: 16
+  gnn_layers: 2
+  output_dim: 128
+  max_visual_tokens: 256
+  detector_backend: yolo
+  yolo_model_path: yolov8n.pt
+  yolo_conf_threshold: 0.25
+  yolo_iou_threshold: 0.7
+
+train:
+  batch_size: 4
+  learning_rate: 0.0001
+  epochs: 50
+  ux_loss_weight: 1.0
+  rank_loss_weight: 5.0
+  rule_loss_weight: 0.05
+  use_wandb: true
+  wandb_project: CV project
+
+# Rule checker configuration
+rules:
+  n_rules: 7
+  wcag_aa_contrast: 4.5
+  whitespace_lo: 0.25
+  whitespace_hi: 0.60
+  # Rule names (must match definitions.py RULE_NAMES order)
+  names:
+    - contrast
+    - whitespace
+    - visual_balance
+    - density
+    - alignment
+    - cta_prominence
+    - reading_flow
+  # Prior importance weights (sum not required to equal 1)
+  weights:
+    - 1.5   # contrast
+    - 1.0   # whitespace
+    - 0.8   # visual_balance
+    - 1.0   # density
+    - 1.2   # alignment
+    - 1.0   # cta_prominence
+    - 0.8   # reading_flow

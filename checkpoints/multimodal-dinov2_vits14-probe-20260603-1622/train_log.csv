@@ -1,0 +1,2 @@
+epoch,train_loss,val_tau,val_rho,val_mae,is_best
+1,1.7179,0.0887,0.1246,0.2785,True

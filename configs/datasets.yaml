@@ -1,0 +1,22 @@
+# Dataset configuration for UX Quality Assessment
+# Task  : UI Quality Scoring (Group 3)
+# Source: UICrit (UIST 2024) + RICO screenshots
+
+datasets:
+  ux_score_training:
+    task: ux_score_training
+    dataset_name: UICrit
+    raw_root: data/raw/uicrit
+    image_dir: data/raw/rico/combined        # RICO screenshots matched by ui_id
+    annotation_dir: data/raw/uicrit          # contains data.json
+    split_files:
+      train: data/manifests/uicrit_train.csv
+      val:   data/manifests/uicrit_val.csv
+      test:  data/manifests/uicrit_test.csv
+
+  rico_screenshots:
+    task: screenshot_source
+    dataset_name: RICO
+    raw_root: data/raw/rico
+    image_dir: data/raw/rico/combined        # <ui_id>.jpg
+    split_files: {}                          # no independent split; used via UICrit
