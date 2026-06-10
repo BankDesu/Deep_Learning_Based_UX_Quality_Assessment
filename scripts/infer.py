@@ -10,20 +10,39 @@ if str(SRC) not in sys.path:
 
 from uxqa.config import load_config
 from uxqa.models import UXAssessmentModel
+from uxqa.models.rules.definitions import RULE_NAMES
 
 
-def run_infer(config_path: str = "configs/default.yaml") -> None:
+def run_infer(
+    config_path: str = "configs/default.yaml",
+    checkpoint: str | None = None,
+) -> None:
     cfg = load_config(Path(config_path))
-    model = UXAssessmentModel(cfg.model)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
+    model = UXAssessmentModel(cfg.model).to(device)
+
+    if checkpoint:
+        ckpt = torch.load(checkpoint, map_location=device, weights_only=True)
+        model.load_state_dict(ckpt["model"])
+        print(f"Loaded checkpoint: {checkpoint}")
+
     model.eval()
 
-    x = torch.randn(1, cfg.model.in_channels, cfg.model.image_size, cfg.model.image_size)
+    x = torch.randn(1, cfg.model.in_channels, cfg.model.image_size, cfg.model.image_size).to(device)
     with torch.no_grad():
         out = model(x)
 
-    print("ux_score:", out["ux_score"].squeeze().item())
-    print("layout_quality:", out["layout_quality"].squeeze().item())
-    print("attention_alignment:", out["attention_alignment"].squeeze().item())
+    print(f"quality_score : {out['quality_score'].squeeze().item():.4f}")
+    print("rule_scores:")
+    for name, score in zip(RULE_NAMES, out["rule_scores"][0].tolist()):
+        flag = "✓" if score >= 0.5 else "✗"
+        print(f"  {flag} {name:<20} {score:.4f}")
 
 
 if __name__ == "__main__":

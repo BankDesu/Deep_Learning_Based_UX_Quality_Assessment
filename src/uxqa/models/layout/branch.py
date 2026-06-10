@@ -13,6 +13,8 @@ class LayoutBranchOutput:
     layout_embedding: torch.Tensor
     layout_token: torch.Tensor
     graph_density: torch.Tensor
+    det_n_boxes: torch.Tensor    # [B] int — boxes detected per image
+    det_avg_conf: torch.Tensor   # [B] float — mean confidence per image
 
 
 class LayoutBranch(nn.Module):
@@ -22,9 +24,19 @@ class LayoutBranch(nn.Module):
         out_dim: int,
         max_elements: int = 16,
         gnn_layers: int = 2,
+        detector_backend: str = "placeholder",
+        yolo_model_path: str = "yolov8n.pt",
+        yolo_conf_threshold: float = 0.25,
+        yolo_iou_threshold: float = 0.7,
     ) -> None:
         super().__init__()
-        self.detector = YoloV8DetectorAdapter(max_elements=max_elements)
+        self.detector = YoloV8DetectorAdapter(
+            max_elements=max_elements,
+            backend=detector_backend,
+            model_path=yolo_model_path,
+            conf_threshold=yolo_conf_threshold,
+            iou_threshold=yolo_iou_threshold,
+        )
         self.gnn = SimpleGNNEncoder(in_dim=visual_dim, hidden_dim=out_dim, layers=gnn_layers)
         self.token_proj = nn.Linear(out_dim, out_dim)
 
@@ -37,14 +49,24 @@ class LayoutBranch(nn.Module):
         cy = (((boxes[:, 1] + boxes[:, 3]) * 0.5) * (h - 1)).long().clamp(0, max(h - 1, 0))
         return feature_map[:, cy, cx].transpose(0, 1)
 
-    def forward(self, visual_feature_map: torch.Tensor) -> LayoutBranchOutput:
+    def forward(
+        self,
+        visual_feature_map: torch.Tensor,
+        screenshot: torch.Tensor | None = None,
+    ) -> LayoutBranchOutput:
         b, c, _, _ = visual_feature_map.shape
-        detections = self.detector(visual_feature_map)
+        detections = self.detector(visual_feature_map, screenshot=screenshot)
         batch_embeddings: list[torch.Tensor] = []
         graph_density: list[torch.Tensor] = []
+        n_boxes_list: list[int] = []
+        avg_conf_list: list[float] = []
 
         for i in range(b):
-            boxes = detections[i].boxes
+            det = detections[i]
+            boxes = det.boxes
+            n_boxes_list.append(boxes.shape[0])
+            avg_conf_list.append(det.scores.mean().item() if det.scores.numel() > 0 else 0.0)
+
             node_features = self._sample_node_features(visual_feature_map[i], boxes)
             adjacency = build_layout_graph(boxes)
             graph_density.append(adjacency.mean() if adjacency.numel() else torch.tensor(0.0, device=visual_feature_map.device))
@@ -59,4 +81,11 @@ class LayoutBranch(nn.Module):
         layout_embedding = torch.stack(batch_embeddings, dim=0).reshape(b, -1)
         layout_token = self.token_proj(layout_embedding).unsqueeze(1)
         density = torch.stack(graph_density, dim=0)
-        return LayoutBranchOutput(layout_embedding=layout_embedding, layout_token=layout_token, graph_density=density)
+        dev = visual_feature_map.device
+        return LayoutBranchOutput(
+            layout_embedding=layout_embedding,
+            layout_token=layout_token,
+            graph_density=density,
+            det_n_boxes=torch.tensor(n_boxes_list, dtype=torch.float32, device=dev),
+            det_avg_conf=torch.tensor(avg_conf_list, dtype=torch.float32, device=dev),
+        )

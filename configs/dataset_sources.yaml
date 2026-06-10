@@ -1,0 +1,10 @@
+sources:
+  uicrit:
+    method: manual
+    note: "git clone https://github.com/google-research-datasets/uicrit data/raw/uicrit"
+    output_dir: data/raw/uicrit
+
+  rico:
+    method: kaggle
+    kaggle_dataset: ""   # fill in slug when known, e.g. "user/rico-dataset"
+    output_dir: data/raw/rico
